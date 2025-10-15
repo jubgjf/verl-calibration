@@ -190,7 +190,7 @@ class vLLMRollout(BaseRollout):
                 logger.warning(f"cudagraph_capture_sizes must be a list, but got {cudagraph_capture_sizes}")
 
         self.inference_engine = LLM(
-            model=model_path,
+            model=config.another_path if config.use_another_path else model_path,
             enable_sleep_mode=config.free_cache_engine,
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="external_launcher",

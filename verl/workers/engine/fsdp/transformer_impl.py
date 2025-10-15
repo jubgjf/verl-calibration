@@ -1054,3 +1054,68 @@ class FSDPEngineWithValueHead(FSDPEngineWithLMHead):
             values = values[:, -response_length - 1 : -1].squeeze(-1)
 
         return {"values": values}
+
+
+@EngineRegistry.register(model_type="confidence_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+class FSDPEngineWithConfidenceHead(FSDPEngineWithLMHead):
+    """
+    FSDP Engine for models with dual heads (LM head + confidence head).
+    
+    This class ONLY adds confidence score processing on top of the parent class.
+    It does NOT modify any existing functionality in the parent class.
+    """
+
+    def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict):
+        """
+        Extends parent's prepare_model_outputs to add confidence score processing.
+        """
+        # Get standard LM outputs from parent implementation
+        model_output = super().prepare_model_outputs(output, output_args, micro_batch)
+        
+        # Add confidence score processing (new functionality only)
+        breakpoint()
+        self._add_confidence_scores(output, output_args, micro_batch, model_output)
+        
+        return model_output
+    
+    def _add_confidence_scores(self, output, output_args, micro_batch, model_output):
+        """
+        Process and add confidence scores to model output.
+        This is the ONLY new functionality we add.
+        """
+        breakpoint()
+        if not (hasattr(output, 'confidence_scores') and output.confidence_scores is not None):
+            return  # No confidence scores available
+        
+        confidence_scores = output.confidence_scores
+        use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
+        response_length = micro_batch["responses"].size(-1)
+        
+        if use_remove_padding:
+            # Handle remove padding case
+            input_ids = micro_batch["input_ids"]
+            batch_size, seqlen = input_ids.shape
+            
+            if confidence_scores.dim() == 1:  # (total_nnz,) format
+                # Pad confidence scores back to batch format
+                indices = output_args.get("indices")
+                if indices is not None:
+                    full_confidence = pad_input(
+                        hidden_states=confidence_scores.unsqueeze(-1),
+                        indices=indices,
+                        batch=batch_size,
+                        seqlen=seqlen,
+                    )
+                    confidence_scores = full_confidence.squeeze(-1)
+                
+                # Extract response portion
+                confidence_scores = confidence_scores[:, -response_length - 1 : -1]
+            else:
+                # Already in batch format, just slice response portion  
+                confidence_scores = confidence_scores[:, -response_length - 1 : -1]
+        else:
+            # No padding removal - direct slice
+            confidence_scores = confidence_scores[:, -response_length - 1 : -1]
+        
+        # Add to model output
+        model_output["confidence_scores"] = confidence_scores

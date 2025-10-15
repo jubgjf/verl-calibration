@@ -367,7 +367,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 if type(actor_model_config) in AutoModelForVision2Seq._model_mapping.keys():
                     actor_module_class = AutoModelForVision2Seq
                 elif type(actor_model_config) in AutoModelForCausalLM._model_mapping.keys():
-                    actor_module_class = AutoModelForCausalLM
+                    if "WithConfidence" in actor_model_config.architectures[0]:
+                        import verl.models.transformers as vmt
+                        actor_module_class = getattr(vmt, actor_model_config.architectures[0])
+                    else:
+                        actor_module_class = AutoModelForCausalLM
                 elif type(actor_model_config) in AutoModelForImageTextToText._model_mapping.keys():
                     actor_module_class = AutoModelForImageTextToText
                 else:
@@ -684,6 +688,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             per_tensor_param = (
                 (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
                 for name, param in params.items()
+                if (self.config.rollout.exclude_params is None or name not in self.config.rollout.exclude_params)
             )
 
         if self.config.rollout.free_cache_engine:

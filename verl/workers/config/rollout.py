@@ -176,9 +176,20 @@ class RolloutConfig(BaseConfig):
 
     skip_tokenizer_init: bool = False
 
+    use_another_path: bool = False
+
+    another_path: Optional[str] = None
+
+    exclude_params: Optional[list] = None
+
     def __post_init__(self):
         """Validate the rollout config"""
         if self.expert_parallel_size > 1:
             assert self.expert_parallel_size == (self.tensor_model_parallel_size * self.data_parallel_size), (
                 "expert_parallel_size must be equal to tensor_model_parallel_size * data_parallel_size"
             )
+        
+        if self.use_another_path:
+            assert self.another_path is not None
+        else:
+            assert self.another_path is None

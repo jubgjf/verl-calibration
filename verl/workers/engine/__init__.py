@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from .base import BaseEngine, EngineRegistry
-from .fsdp import FSDPEngine, FSDPEngineWithLMHead
+from .fsdp import FSDPEngine, FSDPEngineWithConfidenceHead, FSDPEngineWithLMHead
 
-__all__ = ["BaseEngine", "EngineRegistry", "FSDPEngine", "FSDPEngineWithLMHead"]
+__all__ = ["BaseEngine", "EngineRegistry", "FSDPEngine", "FSDPEngineWithLMHead", "FSDPEngineWithConfidenceHead"]
 
 # Mindspeed must be imported before Megatron to ensure the related monkey patches take effect as expected
 try:

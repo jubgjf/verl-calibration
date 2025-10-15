@@ -90,6 +90,7 @@ class DataParallelPPOActor(BasePPOActor):
         Returns:
             entropy: # (bs, response_len)
             log_probs: # (bs, response_len)
+            # TODO return confidence score here
         """
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
@@ -167,6 +168,7 @@ class DataParallelPPOActor(BasePPOActor):
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
 
+                # breakpoint()
                 output = self.actor_module(
                     input_ids=input_ids_rmpad,
                     attention_mask=None,
@@ -357,6 +359,7 @@ class DataParallelPPOActor(BasePPOActor):
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
+        breakpoint()
         # make sure we are in training mode
         self.actor_module.train()
 
@@ -436,6 +439,7 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         old_log_prob = model_inputs["old_log_probs"]
 
+                    breakpoint()
                     loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
                     # vanilla -> verl.trainer.ppo.core_algos.compute_policy_loss_vanilla
                     # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
@@ -470,6 +474,9 @@ class DataParallelPPOActor(BasePPOActor):
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                         micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item() * loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
+                    
+                    if self.config.use_confidence_loss:
+                        breakpoint()
 
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
