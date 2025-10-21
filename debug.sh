@@ -17,7 +17,7 @@ ray job submit -v \
     actor_rollout_ref.model.path=/var/s3fs/guanjiannan/verl-calibration-checkpoints/new-init/Qwen3-0.6B-conf-v1 \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=2 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=3 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.entropy_coeff=0 \
@@ -32,7 +32,7 @@ ray job submit -v \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.max_num_batched_tokens=16384 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
-    actor_rollout_ref.rollout.n=20 \
+    actor_rollout_ref.rollout.n=40 \
     algorithm.use_kl_in_reward=False \
     trainer.default_local_dir=./verl-saves/debug \
     trainer.critic_warmup=0 \

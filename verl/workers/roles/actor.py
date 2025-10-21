@@ -127,7 +127,30 @@ class ActorWorker(Worker, DistProfilerExtension):
             output = output.to("cpu")
 
         return output
+    @DistProfiler.annotate(color="green", role="actor_compute_log_prob_withconfidence")
+    def compute_log_prob_withconfidence(self, data: DataProto):
+        data.meta_info["use_dynamic_bsz"] = self.config.use_dynamic_bsz
+        data.meta_info["use_fused_kernels"] = self.config.use_fused_kernels
+        data.meta_info["calculate_entropy"] = True
+        if self.config.use_dynamic_bsz:
+            data.meta_info["max_token_len_per_gpu"] = self.config.ppo_infer_max_token_len_per_gpu
+        else:
+            data.meta_info["micro_batch_size_per_gpu"] = self.config.ppo_infer_micro_batch_size_per_gpu
 
+        with self.engine.eval_mode():
+            # TODO: make worker API to accept TensorDict as well
+            data = data.to_tensordict()
+            output = self.engine.infer_batch(data)
+
+        if self.engine.is_mp_src_rank_with_outputs():
+            output = output["model_output"]
+            # in megatron, only last pp contains valid data and returned to the single controller
+            output = DataProto.from_dict(
+                tensors={"old_log_probs": output["log_probs"].float(), "entropy": output["entropy"].float(),"confidence_scores": output["confidence_scores"].float()},
+            )
+            output = output.to("cpu")
+
+        return output
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     def update_actor(self, data: DataProto):

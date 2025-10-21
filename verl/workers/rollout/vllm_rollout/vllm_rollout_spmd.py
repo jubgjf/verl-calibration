@@ -180,7 +180,7 @@ class vLLMRollout(BaseRollout):
         compilation_config = {}
 
         cudagraph_capture_sizes = config.get("cudagraph_capture_sizes")
-        # enforce_eager must be False to use cudagraph
+        # enforce_eager must be False to use cudagraphF
         if not config.enforce_eager and cudagraph_capture_sizes:
             if isinstance(cudagraph_capture_sizes, ListConfig):
                 compilation_config["compilation_config"] = CompilationConfig(
@@ -271,6 +271,7 @@ class vLLMRollout(BaseRollout):
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
+        print("i am testing vllm rollout generate_sequences,reoki")
         idx = prompts.batch["input_ids"]  # (bs, prompt_length)
         # left-padded attention_mask
         attention_mask = prompts.batch["attention_mask"]
@@ -347,8 +348,20 @@ class vLLMRollout(BaseRollout):
                 lora_request=lora_requests,
                 use_tqdm=False,
             )
+        print("Type of outputs:", type(outputs))
+        print("Number of outputs:", len(outputs))
 
-            # TODO(sgm): disable logprob when recompute_log_prob is enable
+        for i, output in enumerate(outputs):
+            print(f"\nOutput {i}:")
+            print("Type:", type(output))
+            # 如果是对象，打印它的属性
+            if hasattr(output, "__dict__"):
+                print("Attributes:", output.__dict__.keys())
+            # 如果有 outputs 列表，打印里面每个元素的属性
+            if hasattr(output, "outputs"):
+                for j, sample in enumerate(output.outputs):
+                    print(f"  Sample {j} attributes:", sample.__dict__.keys())
+                    # TODO(sgm): disable logprob when recompute_log_prob is enable
             # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
 
             response = []

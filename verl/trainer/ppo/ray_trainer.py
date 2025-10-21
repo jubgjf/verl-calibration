@@ -591,7 +591,9 @@ class RayPPOTrainer:
 
             test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
-
+            if self.config.actor_rollout_ref.actor.use_confidence_loss:
+                confidence_output = self.actor_rollout_wg.compute_log_prob_withconfidence(test_batch)
+                test_batch.batch["confidence_scores"] = confidence_output.batch["confidence_scores"]
             # evaluate using reward_function
             if self.val_reward_fn is None:
                 raise ValueError("val_reward_fn must be provided for validation.")
@@ -998,12 +1000,12 @@ class RayPPOTrainer:
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
                     # generate a batch
+                    print("gen11111111111111111111111111111")
                     with marked_timer("gen", timing_raw, color="red"):
                         if not self.async_rollout_mode:
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                         else:
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
-
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
 
@@ -1043,21 +1045,73 @@ class RayPPOTrainer:
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
-
+                    print("self.config.actor_rollout_ref.actor.use_confidence_loss1111111111:", self.config.actor_rollout_ref.actor.use_confidence_loss)
+                    print("response.shape",batch.batch["responses"].shape)
+                    print("==== batch.batch 内容 ====")
+                    for k, v in batch.batch.items():
+                        if hasattr(v, "shape"):
+                            print(f"{k}: shape = {v.shape}, dtype = {v.dtype}")
+                        else:
+                            print(f"{k}: type = {type(v)} (no .shape attribute)")
+                    print("===========================")
+                    if self.config.actor_rollout_ref.actor.use_confidence_loss:
+                        
+                        with marked_timer("actor_forward", timing_raw, color="orange"):
+                            confidence_scores = None
+                            old_log_prob_withconfidence = self.actor_rollout_wg.compute_log_prob_withconfidence(batch)
+                            confidence_scores = old_log_prob_withconfidence.batch["confidence_scores"]
+                            if confidence_scores is not None:
+                                print("i fininally got confidence scores!!!!!!!!!!!!")
+                                print("confidence_scores.shape:",confidence_scores.shape)
+                                print("i fininally got confidence scores!!!!!!!!!!!!")
+  
+                                # 这里的 shape 应该是 (batch_size, response_length)
+                                batch.batch["confidence_scores"] = confidence_scores
+                                print("Added confidence_scores to batch:", confidence_scores.shape)
+                    print("reward1111111111111111111111")
+                    print("response.shape",batch.batch["responses"].shape)
+                    print("confidence_scores.shape",batch.batch["confidence_scores"].shape)
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
+                            print("reward222222222222222222222222")
                             reward_tensor = self.rm_wg.compute_rm_score(batch)
+                            print("reward333333333333333333333333")
                             batch = batch.union(reward_tensor)
 
                         if self.config.reward_model.launch_reward_fn_async:
+                            print("reward4444444444444444444444444444")
                             future_reward = compute_reward_async.remote(data=batch, reward_fn=self.reward_fn)
                         else:
-                            reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                            print("reward55555555555555555555555555")
+                            print("===== [DEBUG] DataProto batch =====")
+                            print("batch.batch keys:", list(batch.batch.keys()))
+                            for k, v in batch.batch.items():
+                                print(f"{k}: {type(v)}, shape={getattr(v, 'shape', None)}")
 
+                            print("\nbatch.non_tensor_batch keys:", list(batch.non_tensor_batch.keys()))
+                            for k, v in batch.non_tensor_batch.items():
+                                print(f"{k}: {type(v)}, value preview={v if isinstance(v, (int, float, str)) else '...' }")
+                            extra_info = batch.non_tensor_batch.get("extra_info", None)
+                            if extra_info is not None:
+                                print("\nextra_info content:")
+                                if isinstance(extra_info, list):
+                                    for i, info in enumerate(extra_info):
+                                        print(f"  extra_info[{i}]: {info}")
+                                else:
+                                    print(f"  extra_info: {extra_info}")
+                            print("===== [DEBUG END] =====")
+  
+                            reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                            print("reward666666666666666666666666666")
                     # recompute old_log_probs
+                    print("old_log_prob11111111111111111111111")
+                    print("type(self.actor_rollout_wg)",type(self.actor_rollout_wg))
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
+                        print("1234312312313231322432342_0")
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                        print("type(old_log_prob):",type(old_log_prob))
+                        print("41232131312312adasdasda")
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
@@ -1121,7 +1175,7 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
-
+                    print("update1111111111111111111111111111111")
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):

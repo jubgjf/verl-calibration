@@ -61,7 +61,7 @@ class Qwen3ForCausalLMWithConfidence(Qwen3ForCausalLM):
         """
         # breakpoint()
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        
+        print("using forward of Qwen3ForCausalLMWithConfidence")
         # Get base model outputs
         transformer_outputs = self.model(
             input_ids=input_ids,
@@ -76,16 +76,21 @@ class Qwen3ForCausalLMWithConfidence(Qwen3ForCausalLM):
             return_dict=return_dict,
             **kwargs
         )
-        
+        print("input_ids.shape",input_ids.shape)
+        print("position_ids.shape",position_ids.shape)
+        print("position_ids",position_ids)
         hidden_states = transformer_outputs[0]
-        
+        last_hidden_state = hidden_states[:, -1, :]
         # Standard LM head forward
         logits = self.lm_head(hidden_states)
         
         # Confidence head forward - outputs per-token confidence scores
-        confidence_logits = self.confidence_head(hidden_states)  # (batch_size, seq_len, 1)
-        confidence_scores = torch.sigmoid(confidence_logits.squeeze(-1)).to(torch.float32)  # (batch_size, seq_len)
+        confidence_logits = self.confidence_head(last_hidden_state)  # (batch_size, seq_len, 1)
+        confidence_scores = torch.sigmoid(confidence_logits).to(torch.float32)  # (batch_size, seq_len)
         
+        print("labels",labels)
+        print("confidence_scores.shape",confidence_scores.shape)
+        print("logits.shape",logits.shape)
         loss = None
         if labels is not None:
             # Compute standard language modeling loss
@@ -93,11 +98,12 @@ class Qwen3ForCausalLMWithConfidence(Qwen3ForCausalLM):
             shift_labels = labels[..., 1:].contiguous()
             loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        
+                
+                    
         if not return_dict:
             output = (logits,) + transformer_outputs[1:]
             return ((loss,) + output) if loss is not None else output
-            
+        
         # Return custom output with confidence scores
         return CausalLMOutputWithConfidence(
             loss=loss,

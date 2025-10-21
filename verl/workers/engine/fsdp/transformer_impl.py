@@ -1088,6 +1088,7 @@ class FSDPEngineWithConfidenceHead(FSDPEngineWithLMHead):
             return  # No confidence scores available
         
         confidence_scores = output.confidence_scores
+        print("/home/jnguan/WengJingxiang/projects/verl-calibration/verl/workers/engine/fsdp/transformer_impl.py confidence_scores ",confidence_scores)
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         response_length = micro_batch["responses"].size(-1)
         
