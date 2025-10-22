@@ -706,16 +706,27 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_module.train()
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
-
-        select_keys = [
-            "responses",
-            "response_mask",
-            "input_ids",
-            "attention_mask",
-            "position_ids",
-            "old_log_probs",
-            "advantages",
-        ]
+        if self.config.use_confidence_loss:
+            select_keys = [
+                "responses",
+                "response_mask",
+                "input_ids",
+                "attention_mask",
+                "position_ids",
+                "old_log_probs",
+                "advantages",
+                "confidence_scores",
+            ]
+        else :
+            select_keys = [
+                "responses",
+                "response_mask",
+                "input_ids",
+                "attention_mask",
+                "position_ids",
+                "old_log_probs",
+                "advantages",
+            ]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         if self.config.tis_imp_ratio_cap > 0:
@@ -764,18 +775,26 @@ class DataParallelPPOActor(BasePPOActor):
                     old_log_prob = model_inputs["old_log_probs"]
                     rollout_log_probs = model_inputs["rollout_log_probs"] if self.config.tis_imp_ratio_cap > 0 else None
                     advantages = model_inputs["advantages"]
-                    reward_model = model_inputs["reward_model"]
+                    extra_info = model_inputs["extra_info"]
+                    confidence_scores = model_inputs["confidence_scores"] if self.config.use_confidence_loss else None
+                    print("confidence_scores in dp_actor update_policy:",confidence_scores)
+                    print("confidence_scores.shape in dp_actor update_policy:",confidence_scores.shape if confidence_scores is not None else None)
                     ground_truth = []
                     responses = model_inputs["responses"]   
-                    print("reward_model",reward_model)
-                    print("type of reward_model:", type(reward_model))
-                    print("len of reward_model:", len(reward_model))
+                    print("extra_info",extra_info)
+                    print("type of extra_info:", type(extra_info))
+                    print("len of extra_info:", len(extra_info))
                     print("responses",responses)
-                    ground_truth = []
-                    for i in reward_model:
-                        gt = i['ground_truth']
-                        ground_truth.append(gt)
-                    print("ground_truth",ground_truth)
+                    # ground_truth = []
+                    # for i in reward_model:
+                    #     gt = i['ground_truth']
+                    #     ground_truth.append(gt)
+                    # print("ground_truth",ground_truth)
+                    average_accuracy = []
+                    for i in extra_info:
+                        if 'average_accuracy' in i:
+                            average_accuracy.append(i['average_accuracy'])
+                    print("average_accuracy",average_accuracy)
                     print("📋 所有键:")
                     for key in sorted(model_inputs.keys()):
                         print(f"  {key}")
@@ -812,6 +831,8 @@ class DataParallelPPOActor(BasePPOActor):
                             model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
                         )
                         print("confidence_scores.shape in dp_actor:",confidence_scores.shape)
+                        print("confidence_scores",confidence_scores)
+                        print("average_accuracy",average_accuracy)
                     if on_policy:
                         old_log_prob = log_prob.detach()
                     else:
@@ -858,8 +879,21 @@ class DataParallelPPOActor(BasePPOActor):
                     if self.config.use_confidence_loss:
                         print("adding confidence loss mse")
                         a = 1
+                        average_accuracy = torch.tensor(average_accuracy, dtype=torch.float32, device=confidence_scores.device)
 
+                        # 保证形状匹配
+                        # confidence_scores: [batch, 1] → [batch]
+                        confidence_scores = confidence_scores.squeeze(-1)
+                        mse_loss_fn = nn.MSELoss()
+                        # 计算 MSE loss
+                        mse_loss = mse_loss_fn(confidence_scores, average_accuracy)
 
+                        print("confidence_scores:", confidence_scores)
+                        print("average_accuracy:", average_accuracy)
+                        print("MSE Loss:", mse_loss.item())
+                        print("self.config.confidence_loss_coef:", self.config.confidence_loss_coef)
+                        loss += mse_loss * self.config.confidence_loss_coef
+                        print("Total Loss after adding confidence loss:", loss.item())
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss = loss * loss_scale_factor

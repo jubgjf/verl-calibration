@@ -17,37 +17,43 @@ import re
 _SOLUTION_CLIP_CHARS = 300
 
 
-def extract_solution(solution_str, method="strict"):
-    assert method in ["strict", "flexible"]
+def extract_solution(solution_str: str, method: str = "strict") -> str:
+    """
+    从模型输出中提取最终答案。
 
-    # Optimization: Regular expression matching on very long strings can be slow.
-    # For math problems, the final answer is usually at the end.
-    # We only match on the last 300 characters, which is a safe approximation for 300 tokens.
-    if len(solution_str) > _SOLUTION_CLIP_CHARS:
-        solution_str = solution_str[-_SOLUTION_CLIP_CHARS:]
+    Args:
+        solution_str: 模型生成的文本
+        method: 提取方法
+            - 'strict': 按照 instruction_following，取 "####" 后面的内容
+            - 'flexible': 尝试匹配数字、整数或浮点数，适用于不严格遵循格式的情况
 
+    Returns:
+        提取的答案字符串，如果无法提取返回 None
+    """
+    if solution_str is None:
+        return None
+    
+    solution_str = solution_str.strip()
+    
     if method == "strict":
-        # this also tests the formatting of the model
-        solutions = re.findall("#### (\\-?[0-9\\.\\,]+)", solution_str)
-        if len(solutions) == 0:
-            final_answer = None
-        else:
-            # take the last solution
-            final_answer = solutions[-1].replace(",", "").replace("$", "")
-    elif method == "flexible":
-        answer = re.findall("(\\-?[0-9\\.\\,]+)", solution_str)
-        final_answer = None
-        if len(answer) == 0:
-            # no reward is there is no answer
-            pass
-        else:
-            invalid_str = ["", "."]
-            # find the last number that is not '.'
-            for final_answer in reversed(answer):
-                if final_answer not in invalid_str:
-                    break
-    return final_answer
+        # 找到最后一个 ####，取其后的内容
+        parts = solution_str.split("####")
+        if len(parts) < 2:
+            return None
+        answer_part = parts[-1].strip()
+        # 去掉多余换行或空格
+        answer_part = answer_part.split("\n")[0].strip()
+        return answer_part if answer_part else None
 
+    elif method == "flexible":
+        # 尝试提取文本中的数字（整数或小数）
+        match = re.search(r"[-+]?\d*\.?\d+", solution_str)
+        if match:
+            return match.group(0)
+        else:
+            return None
+    else:
+        raise ValueError(f"Unsupported method: {method}")
 
 def compute_score(solution_str, ground_truth, method="strict", format_score=0.0, score=1.0,confidence_scores=None,**kwargs):
     """The scoring function for GSM8k.
@@ -62,14 +68,30 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
         format_score: the score for the format
         score: the score for the correct answer
     """
-    
+    print("keywords received in compute_score:", kwargs)
+    print("solution_str in dxm:", solution_str)
     answer = extract_solution(solution_str=solution_str, method=method)
     print("confidence_scores in dxm:", confidence_scores)
     print(f"Extracted answer: {answer}, Ground truth: {ground_truth}")
     print("kwargs in compute_score:", kwargs)
+    extra_info = kwargs.get("extra_info", {})
+    if "average_accuracy" in extra_info:
+        confidence_label = extra_info["average_accuracy"]
+    else :
+        confidence_label = None
+    print("confidence_label in compute_score:", confidence_label)
     is_correct = (answer == ground_truth)
+    if is_correct:
+        base_score = 1 
+    
+    else:
+        base_score = 0
+    print("Base score (is_correct):", base_score)
     if answer is not None:
-        score = is_correct - (confidence_scores - is_correct) ** 2
+        if confidence_scores is not None and confidence_label is not None:
+            score = base_score - (confidence_scores - confidence_label) ** 2
+        else:
+            score = 0
         print("Computed sco3132133213131231234234re in dxm:", score)
         return score
     else:

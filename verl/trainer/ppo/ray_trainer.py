@@ -59,8 +59,44 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+import re
+def extract_solution(solution_str: str, method: str = "strict") -> str:
+    """
+    从模型输出中提取最终答案。
 
+    Args:
+        solution_str: 模型生成的文本
+        method: 提取方法
+            - 'strict': 按照 instruction_following，取 "####" 后面的内容
+            - 'flexible': 尝试匹配数字、整数或浮点数，适用于不严格遵循格式的情况
 
+    Returns:
+        提取的答案字符串，如果无法提取返回 None
+    """
+    if solution_str is None:
+        return None
+    
+    solution_str = solution_str.strip()
+    
+    if method == "strict":
+        # 找到最后一个 ####，取其后的内容
+        parts = solution_str.split("####")
+        if len(parts) < 2:
+            return None
+        answer_part = parts[-1].strip()
+        # 去掉多余换行或空格
+        answer_part = answer_part.split("\n")[0].strip()
+        return answer_part if answer_part else None
+
+    elif method == "flexible":
+        # 尝试提取文本中的数字（整数或小数）
+        match = re.search(r"[-+]?\d*\.?\d+", solution_str)
+        if match:
+            return match.group(0)
+        else:
+            return None
+    else:
+        raise ValueError(f"Unsupported method: {method}")
 @dataclass
 class ResourcePoolManager:
     """
@@ -1054,6 +1090,80 @@ class RayPPOTrainer:
                         else:
                             print(f"{k}: type = {type(v)} (no .shape attribute)")
                     print("===========================")
+                    print("batch.batch['responses'] 内容预览:", batch.batch["responses"][0])  # Preview first 2 responses
+                    response_ids = batch.batch["responses"]
+                    response_str_list = []
+                    reward_model = batch.non_tensor_batch["reward_model"]
+                    print("reward_model:", reward_model)
+                    print("reward_model",type(reward_model))
+                    print("len(reward_model)",len(reward_model))
+                    ground_truth = []
+        
+                    n =  self.config.actor_rollout_ref.rollout.n
+                    m = len(reward_model)//n
+                    for i in reward_model:
+                            gt = i['ground_truth']
+                            ground_truth.append(gt)
+                    print("ground_truth",ground_truth) 
+                    print("ground_truth type",type(ground_truth))
+                    print("ground_truth length",len(ground_truth))                       
+                    for i in range(response_ids.shape[0]):
+                            valid_ids = response_ids[i].tolist()  # 转成 list
+                            response_str = self.tokenizer.decode(valid_ids, skip_special_tokens=True)
+                            response_str_list.append(response_str)
+
+                    print("response_str_list:", response_str_list)
+                    print("response_str_list.shape:", len(response_str_list))
+                    for i in response_str_list:
+                            print("response_str item preview:", i)
+                    model_answers_list = []
+                    for i in range(len(response_str_list)):
+                                model_answer = extract_solution(solution_str=response_str_list[i])
+                                model_answers_list.append(model_answer)
+                    print("model_answers_list:", model_answers_list)
+                    print("model_answers_list.shape:", len(model_answers_list))
+                    group_accuracies = []  # 每个任务的组内平均正确率
+                    for j in range(m):
+                        start = j * n
+                        end = (j + 1) * n
+
+                        correct_num = 0
+                        for i in range(start, end):
+                            if model_answers_list[i] is not None and model_answers_list[i] == ground_truth[i]:
+                                correct_num += 1
+                        group_acc = correct_num / n
+                        group_accuracies.append(group_acc)
+
+                    print("group_accuracies:", group_accuracies)
+                    extra_info = batch.non_tensor_batch.get("extra_info", [{} for _ in range(len(response_str_list))])
+                    for j in range(m):
+                        start = j * n
+                        end = (j + 1) * n
+                        for i in range(start, end):
+                            extra_info[i]["response_str"] = response_str_list[i]
+                            extra_info[i]["average_accuracy"] = group_accuracies[j]
+
+                    batch.non_tensor_batch["extra_info"] = extra_info
+                    # for j in range(m):
+                    #     correct_num = 0
+                    #     for i in range(len(ground_truth)):
+
+                    #         if model_answers_list[i] is not None and model_answers_list[i] == ground_truth[i]:
+                    #             correct_num += 1
+                    #     accuracy = correct_num / len(ground_truth) if len(ground_truth) > 0 else 0.0
+                    #     print("accuracy:", accuracy)
+                    #     # batch 是 DataProto
+                    #     extra_info = batch.non_tensor_batch.get("extra_info", [{} for _ in range(response_ids.shape[0])])
+                    #     for i in range(len(response_str_list)):
+                    #         extra_info[i]["response_str"] = response_str_list[i]
+                    #         extra_info[i]["average_accuracy"] = accuracy
+                            
+                    #     batch.non_tensor_batch["extra_info"] = extra_info
+                    # # response_ids = batch.batch["responses"]
+                    # # response_str = self.tokenizer.decode(response_ids, skip_special_tokens=True)
+                    # print("response_str:",response_str)
+                    # print("response_str.shape:",response_str.shape)
+                    
                     if self.config.actor_rollout_ref.actor.use_confidence_loss:
                         
                         with marked_timer("actor_forward", timing_raw, color="orange"):
