@@ -93,7 +93,11 @@ class NaiveRewardManager(AbstractRewardManager):
             extra_info["num_turns"] = num_turns
             extra_info["rollout_reward_scores"] = rollout_reward_scores
             confidence_scores = None
-            confidence_scores = data_item.batch["confidence_scores"].item() 
+            if "confidence_scores" in data_item.batch:
+                confidence_scores = data_item.batch["confidence_scores"].item()
+            else:
+                confidence_scores = None  # 或者设置默认值，比如 0.0
+
             print("got confidence_score in NaiveRewardManager",confidence_scores)
             if confidence_scores is not None:
                 score = self.compute_score(

@@ -1081,69 +1081,69 @@ class RayPPOTrainer:
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
-                    print("self.config.actor_rollout_ref.actor.use_confidence_loss1111111111:", self.config.actor_rollout_ref.actor.use_confidence_loss)
-                    print("response.shape",batch.batch["responses"].shape)
-                    print("==== batch.batch 内容 ====")
-                    for k, v in batch.batch.items():
-                        if hasattr(v, "shape"):
-                            print(f"{k}: shape = {v.shape}, dtype = {v.dtype}")
-                        else:
-                            print(f"{k}: type = {type(v)} (no .shape attribute)")
-                    print("===========================")
-                    print("batch.batch['responses'] 内容预览:", batch.batch["responses"][0])  # Preview first 2 responses
-                    response_ids = batch.batch["responses"]
-                    response_str_list = []
-                    reward_model = batch.non_tensor_batch["reward_model"]
-                    print("reward_model:", reward_model)
-                    print("reward_model",type(reward_model))
-                    print("len(reward_model)",len(reward_model))
-                    ground_truth = []
+                    # print("self.config.actor_rollout_ref.actor.use_confidence_loss1111111111:", self.config.actor_rollout_ref.actor.use_confidence_loss)
+                    # print("response.shape",batch.batch["responses"].shape)
+                    # print("==== batch.batch 内容 ====")
+                    # for k, v in batch.batch.items():
+                    #     if hasattr(v, "shape"):
+                    #         print(f"{k}: shape = {v.shape}, dtype = {v.dtype}")
+                    #     else:
+                    #         print(f"{k}: type = {type(v)} (no .shape attribute)")
+                    # print("===========================")
+                    # print("batch.batch['responses'] 内容预览:", batch.batch["responses"][0])  # Preview first 2 responses
+                    # response_ids = batch.batch["responses"]
+                    # response_str_list = []
+                    # reward_model = batch.non_tensor_batch["reward_model"]
+                    # print("reward_model:", reward_model)
+                    # print("reward_model",type(reward_model))
+                    # print("len(reward_model)",len(reward_model))
+                    # ground_truth = []
         
-                    n =  self.config.actor_rollout_ref.rollout.n
-                    m = len(reward_model)//n
-                    for i in reward_model:
-                            gt = i['ground_truth']
-                            ground_truth.append(gt)
-                    print("ground_truth",ground_truth) 
-                    print("ground_truth type",type(ground_truth))
-                    print("ground_truth length",len(ground_truth))                       
-                    for i in range(response_ids.shape[0]):
-                            valid_ids = response_ids[i].tolist()  # 转成 list
-                            response_str = self.tokenizer.decode(valid_ids, skip_special_tokens=True)
-                            response_str_list.append(response_str)
+                    # n =  self.config.actor_rollout_ref.rollout.n
+                    # m = len(reward_model)//n
+                    # for i in reward_model:
+                    #         gt = i['ground_truth']
+                    #         ground_truth.append(gt)
+                    # print("ground_truth",ground_truth) 
+                    # print("ground_truth type",type(ground_truth))
+                    # print("ground_truth length",len(ground_truth))                       
+                    # for i in range(response_ids.shape[0]):
+                    #         valid_ids = response_ids[i].tolist()  # 转成 list
+                    #         response_str = self.tokenizer.decode(valid_ids, skip_special_tokens=True)
+                    #         response_str_list.append(response_str)
 
-                    print("response_str_list:", response_str_list)
-                    print("response_str_list.shape:", len(response_str_list))
-                    for i in response_str_list:
-                            print("response_str item preview:", i)
-                    model_answers_list = []
-                    for i in range(len(response_str_list)):
-                                model_answer = extract_solution(solution_str=response_str_list[i])
-                                model_answers_list.append(model_answer)
-                    print("model_answers_list:", model_answers_list)
-                    print("model_answers_list.shape:", len(model_answers_list))
-                    group_accuracies = []  # 每个任务的组内平均正确率
-                    for j in range(m):
-                        start = j * n
-                        end = (j + 1) * n
+                    # print("response_str_list:", response_str_list)
+                    # print("response_str_list.shape:", len(response_str_list))
+                    # for i in response_str_list:
+                    #         print("response_str item preview:", i)
+                    # model_answers_list = []
+                    # for i in range(len(response_str_list)):
+                    #             model_answer = extract_solution(solution_str=response_str_list[i])
+                    #             model_answers_list.append(model_answer)
+                    # print("model_answers_list:", model_answers_list)
+                    # print("model_answers_list.shape:", len(model_answers_list))
+                    # group_accuracies = []  # 每个任务的组内平均正确率
+                    # for j in range(m):
+                    #     start = j * n
+                    #     end = (j + 1) * n
 
-                        correct_num = 0
-                        for i in range(start, end):
-                            if model_answers_list[i] is not None and model_answers_list[i] == ground_truth[i]:
-                                correct_num += 1
-                        group_acc = correct_num / n
-                        group_accuracies.append(group_acc)
+                    #     correct_num = 0
+                    #     for i in range(start, end):
+                    #         if model_answers_list[i] is not None and model_answers_list[i] == ground_truth[i]:
+                    #             correct_num += 1
+                    #     group_acc = correct_num / n
+                    #     group_accuracies.append(group_acc)
 
-                    print("group_accuracies:", group_accuracies)
-                    extra_info = batch.non_tensor_batch.get("extra_info", [{} for _ in range(len(response_str_list))])
-                    for j in range(m):
-                        start = j * n
-                        end = (j + 1) * n
-                        for i in range(start, end):
-                            extra_info[i]["response_str"] = response_str_list[i]
-                            extra_info[i]["average_accuracy"] = group_accuracies[j]
+                    # print("group_accuracies:", group_accuracies)
+                    # extra_info = batch.non_tensor_batch.get("extra_info", [{} for _ in range(len(response_str_list))])
+                    # for j in range(m):
+                    #     start = j * n
+                    #     end = (j + 1) * n
+                    #     for i in range(start, end):
+                    #         extra_info[i]["response_str"] = response_str_list[i]
+                    #         extra_info[i]["average_accuracy"] = group_accuracies[j]
 
-                    batch.non_tensor_batch["extra_info"] = extra_info
+                    # batch.non_tensor_batch["extra_info"] = extra_info
                     # for j in range(m):
                     #     correct_num = 0
                     #     for i in range(len(ground_truth)):
@@ -1165,7 +1165,69 @@ class RayPPOTrainer:
                     # print("response_str.shape:",response_str.shape)
                     
                     if self.config.actor_rollout_ref.actor.use_confidence_loss:
-                        
+                        print("self.config.actor_rollout_ref.actor.use_confidence_loss1111111111:", self.config.actor_rollout_ref.actor.use_confidence_loss)
+                        print("response.shape",batch.batch["responses"].shape)
+                        print("==== batch.batch 内容 ====")
+                        for k, v in batch.batch.items():
+                            if hasattr(v, "shape"):
+                                print(f"{k}: shape = {v.shape}, dtype = {v.dtype}")
+                            else:
+                                print(f"{k}: type = {type(v)} (no .shape attribute)")
+                        print("===========================")
+                        print("batch.batch['responses'] 内容预览:", batch.batch["responses"][0])  # Preview first 2 responses
+                        response_ids = batch.batch["responses"]
+                        response_str_list = []
+                        reward_model = batch.non_tensor_batch["reward_model"]
+                        print("reward_model:", reward_model)
+                        print("reward_model",type(reward_model))
+                        print("len(reward_model)",len(reward_model))
+                        ground_truth = []
+            
+                        n =  self.config.actor_rollout_ref.rollout.n
+                        m = len(reward_model)//n
+                        for i in reward_model:
+                                gt = i['ground_truth']
+                                ground_truth.append(gt)
+                        print("ground_truth",ground_truth) 
+                        print("ground_truth type",type(ground_truth))
+                        print("ground_truth length",len(ground_truth))                       
+                        for i in range(response_ids.shape[0]):
+                                valid_ids = response_ids[i].tolist()  # 转成 list
+                                response_str = self.tokenizer.decode(valid_ids, skip_special_tokens=True)
+                                response_str_list.append(response_str)
+
+                        print("response_str_list:", response_str_list)
+                        print("response_str_list.shape:", len(response_str_list))
+                        for i in response_str_list:
+                                print("response_str item preview:", i)
+                        model_answers_list = []
+                        for i in range(len(response_str_list)):
+                                    model_answer = extract_solution(solution_str=response_str_list[i])
+                                    model_answers_list.append(model_answer)
+                        print("model_answers_list:", model_answers_list)
+                        print("model_answers_list.shape:", len(model_answers_list))
+                        group_accuracies = []  # 每个任务的组内平均正确率
+                        for j in range(m):
+                            start = j * n
+                            end = (j + 1) * n
+
+                            correct_num = 0
+                            for i in range(start, end):
+                                if model_answers_list[i] is not None and model_answers_list[i] == ground_truth[i]:
+                                    correct_num += 1
+                            group_acc = correct_num / n
+                            group_accuracies.append(group_acc)
+
+                        print("group_accuracies:", group_accuracies)
+                        extra_info = batch.non_tensor_batch.get("extra_info", [{} for _ in range(len(response_str_list))])
+                        for j in range(m):
+                            start = j * n
+                            end = (j + 1) * n
+                            for i in range(start, end):
+                                extra_info[i]["response_str"] = response_str_list[i]
+                                extra_info[i]["average_accuracy"] = group_accuracies[j]
+
+                        batch.non_tensor_batch["extra_info"] = extra_info                        
                         with marked_timer("actor_forward", timing_raw, color="orange"):
                             confidence_scores = None
                             old_log_prob_withconfidence = self.actor_rollout_wg.compute_log_prob_withconfidence(batch)
@@ -1178,9 +1240,9 @@ class RayPPOTrainer:
                                 # 这里的 shape 应该是 (batch_size, response_length)
                                 batch.batch["confidence_scores"] = confidence_scores
                                 print("Added confidence_scores to batch:", confidence_scores.shape)
-                    print("reward1111111111111111111111")
-                    print("response.shape",batch.batch["responses"].shape)
-                    print("confidence_scores.shape",batch.batch["confidence_scores"].shape)
+                        print("reward1111111111111111111111")
+                        print("response.shape",batch.batch["responses"].shape)
+                        print("confidence_scores.shape",batch.batch["confidence_scores"].shape)
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
@@ -1194,23 +1256,23 @@ class RayPPOTrainer:
                             future_reward = compute_reward_async.remote(data=batch, reward_fn=self.reward_fn)
                         else:
                             print("reward55555555555555555555555555")
-                            print("===== [DEBUG] DataProto batch =====")
-                            print("batch.batch keys:", list(batch.batch.keys()))
-                            for k, v in batch.batch.items():
-                                print(f"{k}: {type(v)}, shape={getattr(v, 'shape', None)}")
+                            # print("===== [DEBUG] DataProto batch =====")
+                            # print("batch.batch keys:", list(batch.batch.keys()))
+                            # for k, v in batch.batch.items():
+                            #     print(f"{k}: {type(v)}, shape={getattr(v, 'shape', None)}")
 
-                            print("\nbatch.non_tensor_batch keys:", list(batch.non_tensor_batch.keys()))
-                            for k, v in batch.non_tensor_batch.items():
-                                print(f"{k}: {type(v)}, value preview={v if isinstance(v, (int, float, str)) else '...' }")
-                            extra_info = batch.non_tensor_batch.get("extra_info", None)
-                            if extra_info is not None:
-                                print("\nextra_info content:")
-                                if isinstance(extra_info, list):
-                                    for i, info in enumerate(extra_info):
-                                        print(f"  extra_info[{i}]: {info}")
-                                else:
-                                    print(f"  extra_info: {extra_info}")
-                            print("===== [DEBUG END] =====")
+                            # print("\nbatch.non_tensor_batch keys:", list(batch.non_tensor_batch.keys()))
+                            # for k, v in batch.non_tensor_batch.items():
+                            #     print(f"{k}: {type(v)}, value preview={v if isinstance(v, (int, float, str)) else '...' }")
+                            # extra_info = batch.non_tensor_batch.get("extra_info", None)
+                            # if extra_info is not None:
+                            #     print("\nextra_info content:")
+                            #     if isinstance(extra_info, list):
+                            #         for i, info in enumerate(extra_info):
+                            #             print(f"  extra_info[{i}]: {info}")
+                            #     else:
+                            #         print(f"  extra_info: {extra_info}")
+                            # print("===== [DEBUG END] =====")
   
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
                             print("reward666666666666666666666666666")
