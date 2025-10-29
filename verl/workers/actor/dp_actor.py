@@ -457,6 +457,7 @@ class DataParallelPPOActor(BasePPOActor):
                     logits.div_(temperature)
                     logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
                     log_probs = logprobs_from_logits(logits, micro_batch["responses"])
+                    print("12313131313123131314141241432")
                     if calculate_entropy:
                         if not self.config.entropy_checkpointing:
                             entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
@@ -775,8 +776,8 @@ class DataParallelPPOActor(BasePPOActor):
                     response_mask = model_inputs["response_mask"]
                     old_log_prob = model_inputs["old_log_probs"]
                     rollout_log_probs = model_inputs["rollout_log_probs"] if self.config.tis_imp_ratio_cap > 0 else None
+                    advantages = model_inputs["advantages"]
                     if self.config.use_confidence_loss:
-                        advantages = model_inputs["advantages"]
                         extra_info = model_inputs["extra_info"]
                         confidence_scores = model_inputs["confidence_scores"] if self.config.use_confidence_loss else None
                         print("confidence_scores in dp_actor update_policy:",confidence_scores)
