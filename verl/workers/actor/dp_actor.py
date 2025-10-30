@@ -914,6 +914,10 @@ class DataParallelPPOActor(BasePPOActor):
                             "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
                         }
                     )
+
+                    if self.config.use_confidence_loss:
+                        micro_batch_metrics["actor/confidence_mse_loss"] = mse_loss.detach().item() * self.config.confidence_loss_coef
+
                     append_to_dict(metrics, micro_batch_metrics)
                 print("testing _optimizer_step")
                 grad_norm = self._optimizer_step()
