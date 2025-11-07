@@ -49,7 +49,20 @@ class BasePPOActor(ABC):
 
         """
         pass
+    @abstractmethod
+    def compute_log_prob_withconfidence(self, data: DataProto) -> torch.Tensor:
+        """Compute logits given a batch of data.
 
+        Args:
+            data (DataProto): a batch of data represented by DataProto. It must contain key ```input_ids```,
+                ```attention_mask``` and ```position_ids```.
+
+        Returns:
+            DataProto: a DataProto containing the key ```log_probs```
+
+
+        """
+        pass
     @abstractmethod
     def update_policy(self, data: DataProto) -> dict:
         """Update the policy with an iterator of DataProto

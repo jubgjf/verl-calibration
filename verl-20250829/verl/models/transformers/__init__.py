@@ -11,3 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from .dense_common import CausalLMOutputWithConfidence
+from .qwen3_with_confidence import Qwen3ForCausalLMWithConfidence
+
+__all__ = ["CausalLMOutputWithConfidence", "Qwen3ForCausalLMWithConfidence"]

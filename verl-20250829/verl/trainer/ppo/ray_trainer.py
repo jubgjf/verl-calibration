@@ -59,8 +59,86 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+import re
+# def extract_solution(solution_str: str, method: str = "strict") -> str:
+#     """
+#     从模型输出中提取最终答案。
 
+#     Args:
+#         solution_str: 模型生成的文本
+#         method: 提取方法
+#             - 'strict': 按照 instruction_following，取 "####" 后面的内容
+#             - 'flexible': 尝试匹配数字、整数或浮点数，适用于不严格遵循格式的情况
 
+#     Returns:
+#         提取的答案字符串，如果无法提取返回 None
+#     """
+#     if solution_str is None:
+#         return None
+    
+#     solution_str = solution_str.strip()
+    
+#     if method == "strict":
+#         # 找到最后一个 ####，取其后的内容
+#         parts = solution_str.split("####")
+#         if len(parts) < 2:
+#             return None
+#         answer_part = parts[-1].strip()
+#         # 去掉多余换行或空格
+#         answer_part = answer_part.split("\n")[0].strip()
+#         return answer_part if answer_part else None
+
+#     elif method == "flexible":
+#         # 尝试提取文本中的数字（整数或小数）
+#         match = re.search(r"[-+]?\d*\.?\d+", solution_str)
+#         if match:
+#             return match.group(0)
+#         else:
+#             return None
+#     else:
+#         raise ValueError(f"Unsupported method: {method}")
+import re
+
+def extract_solution(solution_str: str) -> str:
+    """
+    智能提取答案，从后往前自动检测格式并提取
+    """
+    if solution_str is None:
+        return None
+    
+    solution_str = solution_str.strip()
+    
+    # 修正方法列表：每个元素都是 (名称, 模式, 标志) 三元组
+    methods = [
+        ("strict_format", r"####\s*([^\n]+)", 0),
+        ("latex_boxed", r"\\boxed\{([^}]+)\}", 0),
+        ("latex_double_dollar", r"\$\$([^$]+)\$\$", 0),
+        ("latex_single_dollar", r"\$([^$]+)\$", 0),
+        ("final_answer", r"Final Answer[:\s]*([^\n]+)", re.IGNORECASE),
+        ("answer_marker", r"Answer[:\s]*([^\n]+)", re.IGNORECASE),
+    ]
+    
+    # 先尝试从后往前搜索结构化格式
+    for method_name, pattern, flags in methods:  # 现在解包三个值
+        matches = list(re.finditer(pattern, solution_str, flags))
+        if matches:
+            last_match = matches[-1]  # 取最后一个匹配
+            extracted = last_match.group(1).strip()
+            
+            # 清理LaTeX内容
+            if method_name.startswith("latex"):
+                num_match = re.search(r"[-+]?\d*\.?\d+", extracted)
+                if num_match:
+                    return num_match.group(0)
+            
+            return extracted
+    
+    # 如果结构化格式都没找到，从后往前找最后一个数字
+    numbers = re.findall(r"[-+]?\d*\.?\d+", solution_str)
+    if numbers:
+        return numbers[-1]  # 返回最后一个数字
+    
+    return None
 @dataclass
 class ResourcePoolManager:
     """
@@ -101,7 +179,7 @@ class ResourcePoolManager:
 
     def _check_resource_available(self):
         """Check if the resource pool can be satisfied in this ray cluster."""
-        node_available_resources = ray.state.available_resources_per_node()
+        node_available_resources = ray._private.state.available_resources_per_node()
         node_available_gpus = {
             node: node_info.get("GPU", 0) if "GPU" in node_info else node_info.get("NPU", 0)
             for node, node_info in node_available_resources.items()
@@ -116,21 +194,6 @@ class ResourcePoolManager:
             raise ValueError(
                 f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}"
             )
-
-        # check each resource pool can be satisfied, O(#resource_pools * #nodes)
-        for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
-            num_gpus, num_nodes = process_on_nodes[0], len(process_on_nodes)
-            for node, available_gpus in node_available_gpus.items():
-                if available_gpus >= num_gpus:
-                    node_available_gpus[node] -= num_gpus
-                    num_nodes -= 1
-                    if num_nodes == 0:
-                        break
-            if num_nodes > 0:
-                raise ValueError(
-                    f"Resource pool {resource_pool_name}: {num_gpus}*{num_nodes}"
-                    + "cannot be satisfied in this ray cluster"
-                )
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
@@ -244,6 +307,7 @@ def compute_advantage(
     elif adv_estimator == AdvantageEstimator.GRPO:
         # Initialize the mask for GRPO calculation
         grpo_calculation_mask = data.batch["response_mask"]
+
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
@@ -456,6 +520,38 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
+    def _log_rollout_data(
+        self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
+    ):
+        """Log rollout data to disk.
+        Args:
+            batch (DataProto): The batch containing rollout data
+            reward_extra_infos_dict (dict): Additional reward information to log
+            timing_raw (dict): Timing information for profiling
+            rollout_data_dir (str): Directory path to save the rollout data
+        """
+        with marked_timer("dump_rollout_generations", timing_raw, color="green"):
+            inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+            outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+            scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+            sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
+
+            reward_extra_infos_to_dump = reward_extra_infos_dict.copy()
+            if "request_id" in batch.non_tensor_batch:
+                reward_extra_infos_dict.setdefault(
+                    "request_id",
+                    batch.non_tensor_batch["request_id"].tolist(),
+                )
+
+            self._dump_generations(
+                inputs=inputs,
+                outputs=outputs,
+                gts=sample_gts,
+                scores=scores,
+                reward_extra_infos_dict=reward_extra_infos_to_dump,
+                dump_path=rollout_data_dir,
+            )
+
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
@@ -507,9 +603,15 @@ class RayPPOTrainer:
         sample_gts = []
         sample_scores = []
         sample_turns = []
+        sample_uids = []
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
+
+            if "uid" not in test_batch.non_tensor_batch:
+                test_batch.non_tensor_batch["uid"] = np.array(
+                    [str(uuid.uuid4()) for _ in range(len(test_batch.batch))], dtype=object
+                )
 
             # repeat test batch
             test_batch = test_batch.repeat(
@@ -525,6 +627,7 @@ class RayPPOTrainer:
             # TODO: Can we keep special tokens except for padding tokens?
             input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
             sample_inputs.extend(input_texts)
+            sample_uids.extend(test_batch.non_tensor_batch["uid"])
 
             ground_truths = [
                 item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch
@@ -566,7 +669,9 @@ class RayPPOTrainer:
 
             test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
-
+            if self.config.actor_rollout_ref.actor.use_confidence_loss:
+                confidence_output = self.actor_rollout_wg.compute_log_prob_withconfidence(test_batch)
+                test_batch.batch["confidence_scores"] = confidence_output.batch["confidence_scores"]
             # evaluate using reward_function
             if self.val_reward_fn is None:
                 raise ValueError("val_reward_fn must be provided for validation.")
@@ -607,7 +712,7 @@ class RayPPOTrainer:
 
         data_sources = np.concatenate(data_source_lst, axis=0)
 
-        data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
+        data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
             core_var = "acc" if "acc" in var2metric2val else "reward"
@@ -622,7 +727,6 @@ class RayPPOTrainer:
                         metric_sec = "val-core"
                     else:
                         metric_sec = "val-aux"
-                    data_source = os.path.basename(data_source)
                     pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
                     metric_dict[pfx] = metric_val
 
@@ -631,13 +735,6 @@ class RayPPOTrainer:
             metric_dict["val-aux/num_turns/min"] = sample_turns.min()
             metric_dict["val-aux/num_turns/max"] = sample_turns.max()
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
-        value_list = []
-        for k, v in metric_dict.items():
-            if "acc/mean@" in k:
-                value_list.append(v)
-        if len(value_list) != 0:
-            metric_dict["acc/mean/average_category"] = sum(value_list) / len(value_list)
-                
 
         return metric_dict
 
@@ -728,6 +825,7 @@ class RayPPOTrainer:
             self.ref_policy_wg = all_wg["ref"]
             self.ref_policy_wg.init_model()
 
+        self.rm_wg = None
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
             self.rm_wg.init_model()
@@ -743,8 +841,7 @@ class RayPPOTrainer:
 
             self.async_rollout_mode = True
             self.async_rollout_manager = AgentLoopManager(
-                config=self.config,
-                worker_group=self.actor_rollout_wg,
+                config=self.config, worker_group=self.actor_rollout_wg, rm_wg=self.rm_wg
             )
 
     def _save_checkpoint(self):
@@ -965,7 +1062,6 @@ class RayPPOTrainer:
                         if self.config.global_profiler.profile_continuous_steps
                         else curr_step_profile
                     )
-
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
 
                 # add uid to batch
@@ -980,9 +1076,9 @@ class RayPPOTrainer:
                 gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
 
                 is_last_step = self.global_steps >= self.total_training_steps
-
                 with marked_timer("step", timing_raw):
                     # generate a batch
+                    print("gen11111111111111111111111111111")
                     with marked_timer("gen", timing_raw, color="red"):
                         if not self.async_rollout_mode:
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
@@ -1011,7 +1107,6 @@ class RayPPOTrainer:
                             batch.batch["reward_baselines"] = reward_baseline_tensor
 
                             del gen_baseline_batch, gen_baseline_output
-
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
@@ -1028,21 +1123,210 @@ class RayPPOTrainer:
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+                    # print("self.config.actor_rollout_ref.actor.use_confidence_loss1111111111:", self.config.actor_rollout_ref.actor.use_confidence_loss)
+                    # print("response.shape",batch.batch["responses"].shape)
+                    # print("==== batch.batch 内容 ====")
+                    # for k, v in batch.batch.items():
+                    #     if hasattr(v, "shape"):
+                    #         print(f"{k}: shape = {v.shape}, dtype = {v.dtype}")
+                    #     else:
+                    #         print(f"{k}: type = {type(v)} (no .shape attribute)")
+                    # print("===========================")
+                    # print("batch.batch['responses'] 内容预览:", batch.batch["responses"][0])  # Preview first 2 responses
+                    # response_ids = batch.batch["responses"]
+                    # response_str_list = []
+                    # reward_model = batch.non_tensor_batch["reward_model"]
+                    # print("reward_model:", reward_model)
+                    # print("reward_model",type(reward_model))
+                    # print("len(reward_model)",len(reward_model))
+                    # ground_truth = []
+        
+                    # n =  self.config.actor_rollout_ref.rollout.n
+                    # m = len(reward_model)//n
+                    # for i in reward_model:
+                    #         gt = i['ground_truth']
+                    #         ground_truth.append(gt)
+                    # print("ground_truth",ground_truth) 
+                    # print("ground_truth type",type(ground_truth))
+                    # print("ground_truth length",len(ground_truth))                       
+                    # for i in range(response_ids.shape[0]):
+                    #         valid_ids = response_ids[i].tolist()  # 转成 list
+                    #         response_str = self.tokenizer.decode(valid_ids, skip_special_tokens=True)
+                    #         response_str_list.append(response_str)
 
+                    # print("response_str_list:", response_str_list)
+                    # print("response_str_list.shape:", len(response_str_list))
+                    # for i in response_str_list:
+                    #         print("response_str item preview:", i)
+                    # model_answers_list = []
+                    # for i in range(len(response_str_list)):
+                    #             model_answer = extract_solution(solution_str=response_str_list[i])
+                    #             model_answers_list.append(model_answer)
+                    # print("model_answers_list:", model_answers_list)
+                    # print("model_answers_list.shape:", len(model_answers_list))
+                    # group_accuracies = []  # 每个任务的组内平均正确率
+                    # for j in range(m):
+                    #     start = j * n
+                    #     end = (j + 1) * n
+
+                    #     correct_num = 0
+                    #     for i in range(start, end):
+                    #         if model_answers_list[i] is not None and model_answers_list[i] == ground_truth[i]:
+                    #             correct_num += 1
+                    #     group_acc = correct_num / n
+                    #     group_accuracies.append(group_acc)
+
+                    # print("group_accuracies:", group_accuracies)
+                    # extra_info = batch.non_tensor_batch.get("extra_info", [{} for _ in range(len(response_str_list))])
+                    # for j in range(m):
+                    #     start = j * n
+                    #     end = (j + 1) * n
+                    #     for i in range(start, end):
+                    #         extra_info[i]["response_str"] = response_str_list[i]
+                    #         extra_info[i]["average_accuracy"] = group_accuracies[j]
+
+                    # batch.non_tensor_batch["extra_info"] = extra_info
+                    # for j in range(m):
+                    #     correct_num = 0
+                    #     for i in range(len(ground_truth)):
+
+                    #         if model_answers_list[i] is not None and model_answers_list[i] == ground_truth[i]:
+                    #             correct_num += 1
+                    #     accuracy = correct_num / len(ground_truth) if len(ground_truth) > 0 else 0.0
+                    #     print("accuracy:", accuracy)
+                    #     # batch 是 DataProto
+                    #     extra_info = batch.non_tensor_batch.get("extra_info", [{} for _ in range(response_ids.shape[0])])
+                    #     for i in range(len(response_str_list)):
+                    #         extra_info[i]["response_str"] = response_str_list[i]
+                    #         extra_info[i]["average_accuracy"] = accuracy
+                            
+                    #     batch.non_tensor_batch["extra_info"] = extra_info
+                    # # response_ids = batch.batch["responses"]
+                    # # response_str = self.tokenizer.decode(response_ids, skip_special_tokens=True)
+                    # print("response_str:",response_str)
+                    # print("response_str.shape:",response_str.shape)
+                    
+                    if self.config.actor_rollout_ref.actor.use_confidence_loss:
+                        print("self.config.actor_rollout_ref.actor.use_confidence_loss1111111111:", self.config.actor_rollout_ref.actor.use_confidence_loss)
+                        print("response.shape",batch.batch["responses"].shape)
+                        print("==== batch.batch 内容 ====")
+                        for k, v in batch.batch.items():
+                            if hasattr(v, "shape"):
+                                print(f"{k}: shape = {v.shape}, dtype = {v.dtype}")
+                                break
+                            else:
+                                print(f"{k}: type = {type(v)} (no .shape attribute)")
+                        print("===========================")
+                        print("batch.batch['responses'] 内容预览:", batch.batch["responses"][0])  # Preview first 2 responses
+                        response_ids = batch.batch["responses"]
+                        response_str_list = []
+                        reward_model = batch.non_tensor_batch["reward_model"]
+                        print("reward_model:", reward_model)
+                        print("reward_model",type(reward_model))
+                        print("len(reward_model)",len(reward_model))
+                        ground_truth = []
+            
+                        n =  self.config.actor_rollout_ref.rollout.n
+                        m = len(reward_model)//n
+                        for i in reward_model:
+                                gt = i['ground_truth']
+                                ground_truth.append(gt)
+                        print("ground_truth",ground_truth) 
+                        print("ground_truth type",type(ground_truth))
+                        print("ground_truth length",len(ground_truth))                       
+                        for i in range(response_ids.shape[0]):
+                                valid_ids = response_ids[i].tolist()  # 转成 list
+                                response_str = self.tokenizer.decode(valid_ids, skip_special_tokens=True)
+                                response_str_list.append(response_str)
+
+                        print("response_str_list:", response_str_list)
+                        print("response_str_list.shape:", len(response_str_list))
+                        for i in response_str_list:
+                                print("response_str item preview:", i)
+                        model_answers_list = []
+                        for i in range(len(response_str_list)):
+                                    model_answer = extract_solution(solution_str=response_str_list[i])
+                                    model_answers_list.append(model_answer)
+                        print("model_answers_list:", model_answers_list)
+                        print("model_answers_list.shape:", len(model_answers_list))
+                        group_accuracies = []  # 每个任务的组内平均正确率
+                        for j in range(m):
+                            start = j * n
+                            end = (j + 1) * n
+
+                            correct_num = 0
+                            for i in range(start, end):
+                                if model_answers_list[i] is not None and model_answers_list[i] == ground_truth[i]:
+                                    correct_num += 1
+                            group_acc = correct_num / n
+                            group_accuracies.append(group_acc)
+
+                        print("group_accuracies:", group_accuracies)
+                        extra_info = batch.non_tensor_batch.get("extra_info", [{} for _ in range(len(response_str_list))])
+                        for j in range(m):
+                            start = j * n
+                            end = (j + 1) * n
+                            for i in range(start, end):
+                                extra_info[i]["response_str"] = response_str_list[i]
+                                extra_info[i]["average_accuracy"] = group_accuracies[j]
+
+                        batch.non_tensor_batch["extra_info"] = extra_info                        
+                        with marked_timer("actor_forward", timing_raw, color="orange"):
+                            confidence_scores = None
+                            old_log_prob_withconfidence = self.actor_rollout_wg.compute_log_prob_withconfidence(batch)
+                            confidence_scores = old_log_prob_withconfidence.batch["confidence_scores"]
+                            if confidence_scores is not None:
+                                print("i fininally got confidence scores!!!!!!!!!!!!")
+                                print("confidence_scores.shape:",confidence_scores.shape)
+                                print("i fininally got confidence scores!!!!!!!!!!!!")
+  
+                                # 这里的 shape 应该是 (batch_size, response_length)
+                                batch.batch["confidence_scores"] = confidence_scores
+                                print("Added confidence_scores to batch:", confidence_scores.shape)
+                        print("reward1111111111111111111111")
+                        print("response.shape",batch.batch["responses"].shape)
+                        print("confidence_scores.shape",batch.batch["confidence_scores"].shape)
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
-                        if self.use_rm:
+                        if self.use_rm and "rm_scores" not in batch.batch.keys():
+                            print("reward222222222222222222222222")
                             reward_tensor = self.rm_wg.compute_rm_score(batch)
+                            print("reward333333333333333333333333")
                             batch = batch.union(reward_tensor)
 
                         if self.config.reward_model.launch_reward_fn_async:
+                            print("reward4444444444444444444444444444")
                             future_reward = compute_reward_async.remote(data=batch, reward_fn=self.reward_fn)
                         else:
-                            reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                            print("reward55555555555555555555555555")
+                            # print("===== [DEBUG] DataProto batch =====")
+                            # print("batch.batch keys:", list(batch.batch.keys()))
+                            # for k, v in batch.batch.items():
+                            #     print(f"{k}: {type(v)}, shape={getattr(v, 'shape', None)}")
 
+                            # print("\nbatch.non_tensor_batch keys:", list(batch.non_tensor_batch.keys()))
+                            # for k, v in batch.non_tensor_batch.items():
+                            #     print(f"{k}: {type(v)}, value preview={v if isinstance(v, (int, float, str)) else '...' }")
+                            # extra_info = batch.non_tensor_batch.get("extra_info", None)
+                            # if extra_info is not None:
+                            #     print("\nextra_info content:")
+                            #     if isinstance(extra_info, list):
+                            #         for i, info in enumerate(extra_info):
+                            #             print(f"  extra_info[{i}]: {info}")
+                            #     else:
+                            #         print(f"  extra_info: {extra_info}")
+                            # print("===== [DEBUG END] =====")
+  
+                            reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                            print("reward666666666666666666666666666")
                     # recompute old_log_probs
+                    print("old_log_prob11111111111111111111111")
+                    print("type(self.actor_rollout_wg)",type(self.actor_rollout_wg))
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
+                        print("1234312312313231322432342_0")
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                        print("type(old_log_prob):",type(old_log_prob))
+                        print("41232131312312adasdasda")
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
@@ -1093,7 +1377,6 @@ class RayPPOTrainer:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
                         # compute advantages, executed on the driver process
-
                         norm_adv_by_std_in_grpo = self.config.algorithm.get(
                             "norm_adv_by_std_in_grpo", True
                         )  # GRPO adv normalization factor
@@ -1107,7 +1390,7 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
-
+                    print("update1111111111111111111111111111111")
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
@@ -1127,29 +1410,7 @@ class RayPPOTrainer:
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
-                        with marked_timer("dump_rollout_generations", timing_raw, color="green"):
-                            inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
-                            outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
-                            scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
-                            sample_gts = [
-                                item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None)
-                                for item in batch
-                            ]
-
-                            if "request_id" in batch.non_tensor_batch:
-                                reward_extra_infos_dict.setdefault(
-                                    "request_id",
-                                    batch.non_tensor_batch["request_id"].tolist(),
-                                )
-
-                            self._dump_generations(
-                                inputs=inputs,
-                                outputs=outputs,
-                                gts=sample_gts,
-                                scores=scores,
-                                reward_extra_infos_dict=reward_extra_infos_dict,
-                                dump_path=rollout_data_dir,
-                            )
+                        self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
                 # validate
                 if (

@@ -559,7 +559,11 @@ class RayWorkerGroup(WorkerGroup):
         # fused worker not used
         remote_call = getattr(worker, method_name)
         return remote_call.remote(*args, **kwargs)
-
+    def compute_log_prob_withconfidence(self, data):
+        """
+        调用 rank 0 worker 的 compute_log_prob_withconfidence 方法
+        """
+        return self.execute_rank_zero("compute_log_prob_withconfidence", data)
     def execute_rank_zero_sync(self, method_name: str, *args, **kwargs):
         """Execute a method on rank zero worker synchronously.
 
