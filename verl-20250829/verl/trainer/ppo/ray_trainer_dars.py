@@ -34,6 +34,7 @@ from omegaconf import OmegaConf, open_dict
 from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
+from verl import protocol
 
 from verl import DataProto
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
@@ -48,7 +49,6 @@ from verl.trainer.ppo.metric_utils import (
     compute_throughout_metrics,
     compute_timing_metrics,
     process_validation_metrics,
-    process_validation_metrics_only_mean,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
@@ -60,6 +60,8 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+import copy
+import math
 
 
 @dataclass
@@ -192,6 +194,79 @@ def compute_response_mask(data: DataProto):
     response_length = responses.size(1)
     attention_mask = data.batch["attention_mask"]
     return attention_mask[:, -response_length:]
+
+"""DARS"""
+
+def schedule_ET(acc, N, N_max, std=False):
+    if acc <= 1e-6:
+        # return N_max - N 
+        acc = 0.5 / N
+    
+    if acc >= 0.5:
+        return 0
+    
+    if std: # 2 sqrt(acc * (1-acc))
+        S_acc = 2 * math.sqrt(acc * (1-acc))
+        A_g_peak = N
+    else:
+        S_acc =  2 * acc * (1-acc)
+        A_g_peak = 0.5 * N
+    
+    A_g_current = N * S_acc
+
+    delt_N = A_g_peak - A_g_current
+    delt_N /= S_acc
+
+    delt_N = min(math.ceil(delt_N), N_max - N)
+
+    return delt_N
+
+def schedule_HW(acc, N, N_max, std=False):
+    if acc <= 1e-6:
+        # return N_max - N
+        acc = 0.5 / N
+    
+    if acc >= 0.5:
+        return 0
+    
+    if std: # 2 sqrt(acc * (1-acc))
+        S_acc = 2 * math.sqrt(acc * (1-acc))
+        A_g_peak = N
+    else:
+        S_acc =  2 * acc * (1-acc)
+        A_g_peak = 0.5 * N
+    
+    A_g_current = N * S_acc
+
+    delt_N = 2 * (1 - acc) * A_g_peak - A_g_current
+    delt_N /= S_acc
+
+    delt_N = min(math.ceil(delt_N), N_max - N)
+
+    return delt_N
+
+
+
+def select_resample_func(func_id):
+    if func_id == 1:
+        return schedule_ET
+    elif func_id == 2:
+        return schedule_HW
+    else:
+        raise NotImplementedError(f'Unknown resampling function id: {func_id}')
+
+
+
+
+def get_id2mean(data: DataProto):
+    token_level_rewards = data.batch['token_level_scores']
+    responses = data.batch['responses']
+    response_length = responses.size(-1)
+    attention_mask = data.batch['attention_mask']
+    response_mask = attention_mask[:, -response_length:]
+    index = data.non_tensor_batch['uid']
+    id2mean = core_algos.compute_id2mean(token_level_rewards=token_level_rewards, eos_mask=response_mask, index=index)
+    return id2mean
 
 
 def compute_advantage(
@@ -564,7 +639,6 @@ class RayPPOTrainer:
             output_ids = test_output_gen_batch.batch["responses"]
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
-            print("validation decode end")
 
             test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
@@ -609,7 +683,7 @@ class RayPPOTrainer:
 
         data_sources = np.concatenate(data_source_lst, axis=0)
 
-        data_src2var2metric2val = process_validation_metrics_only_mean(data_sources, sample_inputs, reward_extra_infos_dict)
+        data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
             core_var = "acc" if "acc" in var2metric2val else "reward"
@@ -948,6 +1022,9 @@ class RayPPOTrainer:
         last_val_metrics = None
         self.max_steps_duration = 0
 
+        """DARS"""
+        resample_func = select_resample_func(self.config.data.resampling_func)
+
         prev_step_profile = False
         curr_step_profile = (
             self.global_steps in self.config.global_profiler.steps
@@ -974,6 +1051,8 @@ class RayPPOTrainer:
                 batch.non_tensor_batch["uid"] = np.array(
                     [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                 )
+                """DARS"""
+                original_input_batch = copy.deepcopy(batch)
 
                 gen_batch = self._get_gen_batch(batch)
 
@@ -985,13 +1064,145 @@ class RayPPOTrainer:
 
                 with marked_timer("step", timing_raw):
                     # generate a batch
-                    with marked_timer("gen", timing_raw, color="red"):
+                    """ ------- First Sampling -------"""
+                    with marked_timer("gen-1", timing_raw, color="red"):
                         if not self.async_rollout_mode:
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                         else:
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
+                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    batch = batch.union(gen_batch_output)
+                    """ ------- First Score -------"""
+                    with marked_timer("reward-1", timing_raw, color="yellow"):
+                        # compute reward model score
+                        if self.use_rm:
+                            reward_tensor = self.rm_wg.compute_rm_score(batch)
+                            batch = batch.union(reward_tensor)
+
+                        if self.config.reward_model.launch_reward_fn_async:
+                            future_reward = compute_reward_async.remote(data=batch, reward_fn=self.reward_fn)
+                        else:
+                            reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                        if self.config.reward_model.launch_reward_fn_async:
+                            reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                        batch.batch["token_level_scores"] = reward_tensor
+
+                    """ ------- Second Sampling -------"""
+                    id2mean = get_id2mean(batch)
+                    second_batch = []
+                    for i in range(len(original_input_batch)):
+                        line_uid = original_input_batch[i].non_tensor_batch["uid"]
+                        line_acc = id2mean[line_uid]
+                        # print(line_uid, line_acc)
+
+                        # schedule_HW(acc, N, N_max, std=False):
+                        delt_n = resample_func(line_acc, self.config.actor_rollout_ref.rollout.n, self.config.algorithm.n_max, self.config.algorithm.grpo_use_std)
+
+                        if delt_n > 0:
+                            # repeat the batch
+                            second_batch += [original_input_batch[i]] * delt_n
+
+                    print("## re-balance generation batch size:", len(second_batch))
+                    metrics['2nd_rollout'] = len(second_batch)
+                    second_batch = protocol.collate_fn(second_batch)
+
+                    second_batch.meta_info = {
+                        'eos_token_id': self.tokenizer.eos_token_id,
+                        'pad_token_id': self.tokenizer.pad_token_id,
+                        'recompute_log_prob': False,
+                        'do_sample': False,
+                        'validate': True,
+                        'temperature': self.config.actor_rollout_ref.rollout.temperature,
+                    }
+
+                    with marked_timer("gen-2", timing_raw, color="red"):
+                        second_batch_padded, pad_size = pad_dataproto_to_divisor(second_batch, self.actor_rollout_wg.world_size)
+                        if not self.async_rollout_mode:
+                            second_batch_gen_padded = self.actor_rollout_wg.generate_sequences(second_batch_padded)
+                        else:
+                            second_batch_gen_padded = self.async_rollout_manager.generate_sequences(second_batch_padded)
+                        second_batch_gen = unpad_dataproto(second_batch_gen_padded, pad_size=pad_size)
+                        #timing_raw.update(gen_batch_output.meta_info["timing"])
+                        second_batch_gen.meta_info.pop("timing", None)
+                        second_batch.pop(['input_ids', 'attention_mask', 'position_ids'])
+                        second_batch = second_batch.union(second_batch_gen)
+                    """ ------- Second Score -------"""
+                    with marked_timer("reward-2", timing_raw, color="yellow"):
+                        # compute reward model score
+                        if self.use_rm:
+                            reward_tensor = self.rm_wg.compute_rm_score(second_batch)
+                            second_batch = second_batch.union(reward_tensor)
+
+                        if self.config.reward_model.launch_reward_fn_async:
+                            future_reward = compute_reward_async.remote(data=second_batch, reward_fn=self.reward_fn)
+                        else:
+                            reward_tensor, reward_extra_infos_dict = compute_reward(second_batch, self.reward_fn)
+                        if self.config.reward_model.launch_reward_fn_async:
+                            reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                        second_batch.batch["token_level_scores"] = reward_tensor
+
+                    combined_batch = DataProto.concat([second_batch, batch])
+                    upper_threshold = self.config.algorithm.get('upper_threshold', 1.0)
+                    id2mean_combined = get_id2mean(combined_batch)
+
+                    filtered_batch = []
+                    for i in range(len(combined_batch)):
+                        line_uid = combined_batch[i].non_tensor_batch["uid"]
+                        line_acc = id2mean_combined[line_uid]
+                        # print(line_uid, line_acc)
+
+                        if line_acc < upper_threshold and line_acc > 0:
+                            filtered_batch.append(combined_batch[i])
+                    
+                    if len(filtered_batch) == 0:
+                        print("No valid samples left after filtering. Skipping this batch.")
+                        continue
+                    
+                    print(f"Filtered batch size: {len(filtered_batch)}")
+
+                    saved_2nd_sample_count = 0
+                    for uid in id2mean_combined:
+                        if id2mean[uid] < 1e-6 and id2mean_combined[uid] > 1e-6:
+                            saved_2nd_sample_count += 1
+                    print(f"2nd saved sample: {saved_2nd_sample_count} / {len(id2mean_combined)}")
+                    metrics['2nd_saved'] = saved_2nd_sample_count / len(id2mean_combined)
+
+
+                    # print("len of filtered batch: ", len(filtered_batch))
+                    
+                    target_chunk = self.actor_rollout_wg.world_size // self.config.actor_rollout_ref.actor.ulysses_sequence_parallel_size
+                    pad_count = target_chunk - len(filtered_batch) % target_chunk
+                    pad_count = pad_count % target_chunk
+                    if pad_count > 0:
+                        pad_item = copy.deepcopy(filtered_batch[0])
+                        pad_item.non_tensor_batch['uid'] = "padding_item"
+                        pad_item.batch['token_level_scores'] = torch.zeros_like(pad_item.batch['token_level_scores'])
+                        filtered_batch += [pad_item] * pad_count
+                    filtered_batch = protocol.collate_fn(filtered_batch)
+                    # print("="*60)
+                    # print("## padded batch")
+                    # print(filtered_batch)
+                    # print("len of filtered batch after padding: ", len(filtered_batch))
+                    
+                    batch = filtered_batch
+                    
+                    solve_none = 0
+                    solve_all = 0
+                    solve_partial = 0
+                    for uid in id2mean_combined:
+                        if id2mean_combined[uid] < 1e-6:
+                            solve_none += 1
+                        elif id2mean_combined[uid] < 1 - 1e-6:
+                            solve_partial += 1
+                        else:
+                            solve_all += 1
+
+                    # Log to metrics
+                    metrics['batch/solve_none'] = solve_none
+                    metrics['batch/solve_all'] = solve_all
+                    metrics['batch/solve_partial'] = solve_partial
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         if self.reward_fn is None:
@@ -1014,9 +1225,9 @@ class RayPPOTrainer:
 
                             del gen_baseline_batch, gen_baseline_output
 
-                    # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    batch = batch.union(gen_batch_output)
+                    # # repeat to align with repeated responses in rollout
+                    # batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    # batch = batch.union(gen_batch_output)
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
@@ -1025,22 +1236,22 @@ class RayPPOTrainer:
                     # which won't affect the advantage calculation (since it's based on uid),
                     # but might affect the loss calculation (due to the change of mini-batching).
                     # TODO: Decouple the DP balancing and mini-batching.
-                    if self.config.trainer.balance_batch:
-                        self._balance_batch(batch, metrics=metrics)
+                    # if self.config.trainer.balance_batch:
+                    #     self._balance_batch(batch, metrics=metrics)
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
-                    with marked_timer("reward", timing_raw, color="yellow"):
-                        # compute reward model score
-                        if self.use_rm:
-                            reward_tensor = self.rm_wg.compute_rm_score(batch)
-                            batch = batch.union(reward_tensor)
+                    # with marked_timer("reward", timing_raw, color="yellow"):
+                    #     # compute reward model score
+                    #     if self.use_rm:
+                    #         reward_tensor = self.rm_wg.compute_rm_score(batch)
+                    #         batch = batch.union(reward_tensor)
 
-                        if self.config.reward_model.launch_reward_fn_async:
-                            future_reward = compute_reward_async.remote(data=batch, reward_fn=self.reward_fn)
-                        else:
-                            reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                    #     if self.config.reward_model.launch_reward_fn_async:
+                    #         future_reward = compute_reward_async.remote(data=batch, reward_fn=self.reward_fn)
+                    #     else:
+                    #         reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
 
                     # recompute old_log_probs
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
@@ -1078,9 +1289,9 @@ class RayPPOTrainer:
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
-                        if self.config.reward_model.launch_reward_fn_async:
-                            reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
-                        batch.batch["token_level_scores"] = reward_tensor
+                        # if self.config.reward_model.launch_reward_fn_async:
+                        #     reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                        # batch.batch["token_level_scores"] = reward_tensor
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})

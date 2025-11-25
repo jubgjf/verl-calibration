@@ -134,6 +134,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
 
     valid_adv = torch.masked_select(advantages, response_mask)
     valid_returns = torch.masked_select(returns, response_mask)
+    zero_advantage_ratio = (valid_adv == 0).float().mean().item()
 
     if use_critic:
         values = batch.batch["values"]
@@ -169,6 +170,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "critic/advantages/mean": torch.mean(valid_adv).detach().item(),
         "critic/advantages/max": torch.max(valid_adv).detach().item(),
         "critic/advantages/min": torch.min(valid_adv).detach().item(),
+        "critic/advantages/zero_ratio": zero_advantage_ratio,
         # returns
         "critic/returns/mean": torch.mean(valid_returns).detach().item(),
         "critic/returns/max": torch.max(valid_returns).detach().item(),
@@ -488,3 +490,176 @@ def process_validation_metrics(
                 data_src2var2metric2val[data_source][var_name][metric_name] = np.mean(prompt_vals)
 
     return data_src2var2metric2val
+
+
+def process_validation_metrics_only_mean(
+    data_sources: list[str], sample_inputs: list[str], infos_dict: dict[str, list[Any]], seed: int = 42
+) -> dict[str, dict[str, dict[str, float]]]:
+    """
+    Process validation metrics into a structured format with statistical analysis.
+
+    This function organizes validation metrics by data source and prompt, then computes
+    various statistical measures including means, standard deviations, best/worst values,
+    and majority voting results. It also performs bootstrap sampling to estimate statistics
+    for different sample sizes.
+
+    Args:
+        data_sources: List of data source identifiers for each sample.
+        sample_inputs: List of input prompts corresponding to each sample.
+        infos_dict: Dictionary mapping variable names to lists of values for each sample.
+        seed: Random seed for bootstrap sampling. Defaults to 42.
+
+    Returns:
+        A nested dictionary with the structure:
+        {
+            data_source: {
+                variable_name: {
+                    metric_name: value
+                }
+            }
+        }
+
+        Where metric_name includes:
+        - "mean@N": Mean value across N samples
+
+    Example:
+        >>> data_sources = ["source1", "source1", "source2"]
+        >>> sample_inputs = ["prompt1", "prompt1", "prompt2"]
+        >>> infos_dict = {"score": [0.8, 0.9, 0.7], "pred": ["A", "A", "B"]}
+        >>> result = process_validation_metrics(data_sources, sample_inputs, infos_dict)
+        >>> # result will contain statistics for each data source and variable
+    """
+    # Group metrics by data source, prompt and variable
+    data_src2prompt2var2vals = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    for sample_idx, data_source in enumerate(data_sources):
+        prompt = sample_inputs[sample_idx]
+        var2vals = data_src2prompt2var2vals[data_source][prompt]
+        for var_name, var_vals in infos_dict.items():
+            var2vals[var_name].append(var_vals[sample_idx])
+
+    # Calculate metrics for each group
+    data_src2prompt2var2metric = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+    for data_source, prompt2var2vals in data_src2prompt2var2vals.items():
+        for prompt, var2vals in prompt2var2vals.items():
+            for var_name, var_vals in var2vals.items():
+                if isinstance(var_vals[0], str):
+                    continue
+
+                metric = {}
+                n_resps = len(var_vals)
+                metric[f"mean@{n_resps}"] = np.mean(var_vals)
+
+                data_src2prompt2var2metric[data_source][prompt][var_name] = metric
+
+    # Aggregate metrics across prompts
+    data_src2var2metric2prompt_vals = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    for data_source, prompt2var2metric in data_src2prompt2var2metric.items():
+        for prompt, var2metric in prompt2var2metric.items():
+            for var_name, metric in var2metric.items():
+                for metric_name, metric_val in metric.items():
+                    data_src2var2metric2prompt_vals[data_source][var_name][metric_name].append(metric_val)
+
+    data_src2var2metric2val = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+    for data_source, var2metric2prompt_vals in data_src2var2metric2prompt_vals.items():
+        for var_name, metric2prompt_vals in var2metric2prompt_vals.items():
+            for metric_name, prompt_vals in metric2prompt_vals.items():
+                data_src2var2metric2val[data_source][var_name][metric_name] = np.mean(prompt_vals)
+
+    return data_src2var2metric2val
+
+
+def process_validation_metrics_risk(
+    data_sources: list[str], sample_inputs: list[str], infos_dict: dict[str, list[Any]], seed: int = 42
+) -> dict[str, dict[str, dict[str, float]]]:
+    from collections import defaultdict
+    import numpy as np
+    from functools import partial
+
+    # Group metrics by data source, prompt and variable
+    data_src2prompt2var2vals = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    for sample_idx, data_source in enumerate(data_sources):
+        prompt = sample_inputs[sample_idx]
+        var2vals = data_src2prompt2var2vals[data_source][prompt]
+        for var_name, var_vals in infos_dict.items():
+            var2vals[var_name].append(var_vals[sample_idx])
+
+    # Calculate metrics for each group
+    data_src2prompt2var2metric = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+    for data_source, prompt2var2vals in data_src2prompt2var2vals.items():
+        for prompt, var2vals in prompt2var2vals.items():
+            for var_name, var_vals in var2vals.items():
+
+                # ✅ 新增处理 pred 的逻辑
+                if var_name == "pred":
+                    total = len(var_vals)
+                    pass_count = 0
+                    pass_overdue_count = 0
+                    for pred_str in var_vals:
+                        overdue_flag, decision = pred_str.split("-", 1)
+                        overdue_flag = int(overdue_flag)
+                        if decision == "批准放款":
+                            pass_count += 1
+                            if overdue_flag == 1:
+                                pass_overdue_count += 1
+
+                    metric = {}
+                    if total > 0:
+                        metric["pass_rate"] = pass_count / total
+                        metric["pass_overdue_rate"] = pass_overdue_count / total
+                    data_src2prompt2var2metric[data_source][prompt][var_name] = metric
+                    continue
+
+                # 原有的数值型处理逻辑
+                if isinstance(var_vals[0], str):
+                    continue
+
+                metric = {}
+                n_resps = len(var_vals)
+                metric[f"mean@{n_resps}"] = np.mean(var_vals)
+
+                if n_resps > 1:
+                    metric[f"std@{n_resps}"] = np.std(var_vals)
+
+                    ns = []
+                    n = 2
+                    while n < n_resps:
+                        ns.append(n)
+                        n *= 2
+                    ns.append(n_resps)
+
+                    for n in ns:
+                        [(bon_mean, bon_std), (won_mean, won_std)] = bootstrap_metric(
+                            data=var_vals, subset_size=n, reduce_fns=[np.max, np.min], seed=seed
+                        )
+                        metric[f"best@{n}/mean"], metric[f"best@{n}/std"] = bon_mean, bon_std
+                        metric[f"worst@{n}/mean"], metric[f"worst@{n}/std"] = won_mean, won_std
+                        if var2vals.get("pred", None) is not None:
+                            vote_data = [
+                                {"val": val, "pred": pred} for val, pred in zip(var_vals, var2vals["pred"], strict=True)
+                            ]
+                            [(maj_n_mean, maj_n_std)] = bootstrap_metric(
+                                data=vote_data,
+                                subset_size=n,
+                                reduce_fns=[partial(calc_maj_val, vote_key="pred", val_key="val")],
+                                seed=seed,
+                            )
+                            metric[f"maj@{n}/mean"], metric[f"maj@{n}/std"] = maj_n_mean, maj_n_std
+
+                data_src2prompt2var2metric[data_source][prompt][var_name] = metric
+
+    # Aggregate metrics across prompts
+    data_src2var2metric2prompt_vals = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    for data_source, prompt2var2metric in data_src2prompt2var2metric.items():
+        for prompt, var2metric in prompt2var2metric.items():
+            for var_name, metric in var2metric.items():
+                for metric_name, metric_val in metric.items():
+                    data_src2var2metric2prompt_vals[data_source][var_name][metric_name].append(metric_val)
+
+    data_src2var2metric2val = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+    for data_source, var2metric2prompt_vals in data_src2var2metric2prompt_vals.items():
+        for var_name, metric2prompt_vals in var2metric2prompt_vals.items():
+            for metric_name, prompt_vals in metric2prompt_vals.items():
+                data_src2var2metric2val[data_source][var_name][metric_name] = np.mean(prompt_vals)
+
+    return data_src2var2metric2val
+

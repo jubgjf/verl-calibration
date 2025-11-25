@@ -254,7 +254,40 @@ def compute_gae_advantage_return(
         returns = advantages + values
         advantages = verl_F.masked_whiten(advantages, response_mask)
     return advantages, returns
+def compute_id2mean(token_level_rewards: torch.Tensor,
+                eos_mask: torch.Tensor,
+                index: torch.Tensor):
+    response_length = token_level_rewards.shape[-1]
+    scores = token_level_rewards.sum(dim=-1)
 
+    id2score = defaultdict(list)
+    id2mean = {}
+    id2std = {}
+
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])
+        
+        max_len = 0
+        for idx in id2score:
+            if len(id2score[idx]) > max_len:
+                max_len = len(id2score[idx])
+
+        for idx in id2score:
+            if len(id2score[idx]) == 1:
+                if max_len == 1:
+                    id2mean[idx] = torch.tensor(0.0)
+                    id2std[idx] = torch.tensor(1.0)
+                else:
+                    id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
+                    id2std[idx] = torch.tensor(0.0)
+            elif len(id2score[idx]) > 1:
+                id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
+                id2std[idx] = torch.std(torch.tensor([id2score[idx]]))
+            else:
+                raise ValueError(f"no score in prompt index: {idx}")
+    return id2mean
 
 # NOTE(sgm): this implementation only consider outcome supervision, where the reward is a scalar.
 @register_adv_est(AdvantageEstimator.GRPO)  # or simply: @register_adv_est("grpo")

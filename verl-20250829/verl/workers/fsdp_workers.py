@@ -397,6 +397,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.get("reduce_dtype", "fp32"))
             buffer_dtype = PrecisionType.to_dtype(mixed_precision_config.get("buffer_dtype", "fp32"))
         else:
+            # test fp16
             param_dtype = torch.bfloat16
             reduce_dtype = torch.float32
             buffer_dtype = torch.float32

@@ -62,6 +62,10 @@ from verl.utils.ray_utils import ray_noset_visible_devices
 from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from verl.workers.config import RolloutConfig
 from verl.workers.rollout.base import BaseRollout
+from vllm import ModelRegistry
+# from transformers import SeedOssForCausalLM
+# ModelRegistry.register_model("SeedOssForCausalLM", SeedOssForCausalLM)
+# print("==========>", "注册成功！")
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -95,6 +99,10 @@ class vLLMRollout(BaseRollout):
         """
         super().__init__()
         self.config = config
+        from vllm import ModelRegistry
+        from .seed_oss import SeedOssForCausalLM
+        ModelRegistry.register_model("SeedOssForCausalLM", SeedOssForCausalLM)
+        print("==========>", "注册成功！")
 
         tensor_parallel_size = self.config.get("tensor_model_parallel_size", 1)
         assert tensor_parallel_size <= torch.distributed.get_world_size(), (
@@ -312,7 +320,9 @@ class vLLMRollout(BaseRollout):
                 "top_k": -1,
                 "min_p": 0.0,
                 "temperature": 0,
-                "n": 1,  # if greedy, only 1 response
+                "n": 1,# if greedy, only 1 response
+                "stop":['<|im_end|>', '<seed:eos>'],
+                "detokenize":True,
             }
         elif is_validate:
             # TODO: try **
@@ -320,7 +330,9 @@ class vLLMRollout(BaseRollout):
                 "top_k": self.config.val_kwargs.top_k,
                 "top_p": self.config.val_kwargs.top_p,
                 "temperature": self.config.val_kwargs.temperature,
-                "n": 1,  # if validate, already repeat in ray_trainer
+                "n": 1,# if validate, already repeat in ray_trainer
+                "stop":['<|im_end|>', '<seed:eos>'],
+                "detokenize":True,
             }
 
         lora_requests = None
