@@ -8,19 +8,19 @@ cd $WORKING_DIR
 
 # 项目相关
 project_name='verl-calibration'
-exp_name='qwen3-8b--risk_shouxin--v8-jyv2'
+exp_name='debug'
 
 # 模型路径相关
-MODEL_PATH=/var/s3fs/public-models/Qwen/Qwen3-8B
-CKPTS_DIR=/var/s3fs/guanjiannan/verl-calibration-checkpoints/qwen3-8b--risk_shouxin--v8-jyv2
+MODEL_PATH=/var/s3fs/guanjiannan/verl-calibration-checkpoints/new-init/Qwen3-0.6B-conf-v1
+CKPTS_DIR=/var/s3fs/guanjiannan/verl-calibration-checkpoints/debug
 
 # reward function
-REWARD_PATH=/nfs-159/guanjiannan/code/verl-calibration-dxm/llm_reward_dxmbot_mdjson.py
+REWARD_PATH=/nfs-159/guanjiannan/code/verl-calibration-jy-nogit/llm_reward_dxmbot_mdjson.py
 
 # 可复现
 mkdir -p ${CKPTS_DIR}
-cp ${SCRIPT_DIR}/run7.sh ${CKPTS_DIR}/
-cp ${REWARD_PATH}        ${CKPTS_DIR}/
+cp ${SCRIPT_DIR}/debug.sh ${CKPTS_DIR}/
+cp ${REWARD_PATH}         ${CKPTS_DIR}/
 
 # 算法相关
 adv_estimator=grpo
@@ -48,16 +48,19 @@ overlong_buffer_len=$((1024 * 2))
 overlong_penalty_factor=1.0
 
 gen_bsz=512
-train_prompt_bsz=256  #1024
-n_resp_per_prompt=32
-train_prompt_mini_bsz=8192
+train_prompt_bsz=2  #1024
+n_resp_per_prompt=16
+train_prompt_mini_bsz=32
+# train_prompt_bsz=256  #1024
+# n_resp_per_prompt=32
+# train_prompt_mini_bsz=8192
 
 sp_size=1
 use_dynamic_bsz=True
 actor_ppo_max_token_len=$((max_prompt_length * 2 + 2 * max_response_length))
 infer_ppo_max_token_len=$((max_prompt_length * 2 + 2 * max_response_length))
-offload=False
-gen_tp=1
+offload=True
+gen_tp=4
 
 
 # 场景数据
@@ -133,7 +136,7 @@ ray job submit -v \
     reward_model.overlong_buffer.enable=${enable_overlong_buffer} \
     reward_model.overlong_buffer.len=${overlong_buffer_len} \
     reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor} \
-    trainer.logger=['console','wandb'] \
+    trainer.logger=['console'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=8 \
@@ -145,5 +148,11 @@ ray job submit -v \
     trainer.resume_mode=auto \
     trainer.val_before_train=True \
     trainer.log_val_generations=5 \
-    custom_reward_function.path=/nfs-159/guanjiannan/code/verl-calibration-dxm/llm_reward_dxmbot_mdjson.py \
-    custom_reward_function.name=compute_score
+    custom_reward_function.path=$REWARD_PATH \
+    custom_reward_function.name=compute_score \
+    actor_rollout_ref.actor.use_confidence_loss=True \
+    actor_rollout_ref.actor.confidence_loss_coef=1.0 \
+    actor_rollout_ref.model.external_lib=verl.models.transformers \
+    actor_rollout_ref.rollout.use_another_path=True \
+    actor_rollout_ref.rollout.another_path=/var/s3fs/public-models/Qwen/Qwen3-0.6B \
+    actor_rollout_ref.rollout.exclude_params=['confidence_head.weight']

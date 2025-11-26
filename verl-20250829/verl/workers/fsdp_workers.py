@@ -335,7 +335,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 if type(actor_model_config) in AutoModelForVision2Seq._model_mapping.keys():
                     actor_module_class = AutoModelForVision2Seq
                 elif type(actor_model_config) in AutoModelForCausalLM._model_mapping.keys():
-                    actor_module_class = AutoModelForCausalLM
+                    if "WithConfidence" in actor_model_config.architectures[0]:
+                        import verl.models.transformers as vmt
+                        actor_module_class = getattr(vmt, actor_model_config.architectures[0])
+                    else:
+                        actor_module_class = AutoModelForCausalLM
                 else:
                     actor_module_class = AutoModel
 

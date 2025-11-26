@@ -346,6 +346,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             (
                 (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
                 for name, param in updated_params.items()
+                if (self.rollout_config.exclude_params is None or name not in self.rollout_config.exclude_params)
             )
         )
 

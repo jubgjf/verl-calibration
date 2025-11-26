@@ -26,6 +26,11 @@ class CausalLMOutputForPPO(CausalLMOutputWithPast):
     entropy: Optional[torch.FloatTensor] = None
 
 
+@dataclass
+class CausalLMOutputWithConfidence(CausalLMOutputWithPast):
+    confidence_scores: Optional[torch.Tensor] = None
+
+
 def forward_base_model(
     self,
     input_ids: Optional[torch.LongTensor] = None,

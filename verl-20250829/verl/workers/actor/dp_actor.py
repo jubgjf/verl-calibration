@@ -279,6 +279,80 @@ class DataParallelPPOActor(BasePPOActor):
 
             return entropy, log_probs
 
+    def _forward_micro_batch_withconfidence(
+        self, micro_batch, temperature, calculate_entropy=False
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Forward pass with confidence head support.
+        Returns:
+            entropy: # (bs, response_len)
+            log_probs: # (bs, response_len)
+            confidence_scores: # (bs,) - confidence score for each sequence
+        """
+        response_length = micro_batch["responses"].size(-1)
+        multi_modal_inputs = {}
+        if "multi_modal_inputs" in micro_batch.keys():
+            if "image_bound" in micro_batch["multi_modal_inputs"][0]:  # minicpm-o logic
+                for key in micro_batch["multi_modal_inputs"][0].keys():
+                    multi_modal_inputs[key] = [inputs[key] for inputs in micro_batch["multi_modal_inputs"]]
+            else:
+                for key in micro_batch["multi_modal_inputs"][0].keys():
+                    multi_modal_inputs[key] = torch.cat(
+                        [inputs[key] for inputs in micro_batch["multi_modal_inputs"]], dim=0
+                    )
+
+        with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
+            input_ids = micro_batch["input_ids"]
+            batch_size, seqlen = input_ids.shape
+            attention_mask = micro_batch["attention_mask"]
+            position_ids = micro_batch["position_ids"]
+            entropy = None
+            confidence_scores = None
+
+            if position_ids.dim() == 3:  # qwen2vl mrope
+                position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
+
+            # For confidence head, we don't use remove_padding for now
+            # This is a simplified version that works without rmpad
+            if self.use_remove_padding:
+                # TODO: confidence head does not support rmpad yet, fallback to non-rmpad mode
+                pass
+
+            # Use standard forward without remove_padding
+            extra_args = {}
+            if self.use_fused_kernels:
+                extra_args["temperature"] = temperature
+                extra_args["return_dict"] = True
+
+            output = self.actor_module(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                **multi_modal_inputs,
+                use_cache=False,
+                **extra_args,
+            )
+
+            # Extract confidence scores if available
+            if hasattr(output, "confidence_scores") and output.confidence_scores is not None:
+                confidence_scores = output.confidence_scores  # (batch_size,)
+
+            if self.use_fused_kernels:
+                log_probs = output.log_probs[:, -response_length - 1 : -1]
+                entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
+            else:
+                logits = output.logits
+                logits.div_(temperature)
+                logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
+                log_probs = logprobs_from_logits(logits, micro_batch["responses"])
+                if calculate_entropy:
+                    if not self.config.entropy_checkpointing:
+                        entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
+                    else:
+                        entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
+
+            return entropy, log_probs, confidence_scores
+
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
 
@@ -334,15 +408,31 @@ class DataParallelPPOActor(BasePPOActor):
         else:
             micro_batches = data.split(micro_batch_size)
 
+        # Check if model has confidence head
+        has_confidence_head = False
+        if hasattr(self.actor_module, "module"):
+            has_confidence_head = hasattr(self.actor_module.module, "confidence_head")
+        elif hasattr(self.actor_module, "confidence_head"):
+            has_confidence_head = True
+
         log_probs_lst = []
         entropy_lst = []
+        confidence_scores_lst = []
+
         for micro_batch in micro_batches:
             micro_batch = micro_batch.to(get_device_id())
             model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                entropy, log_probs = self._forward_micro_batch(
-                    model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
-                )
+                if has_confidence_head:
+                    entropy, log_probs, confidence_scores = self._forward_micro_batch_withconfidence(
+                        model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
+                    )
+                    if confidence_scores is not None:
+                        confidence_scores_lst.append(confidence_scores)
+                else:
+                    entropy, log_probs = self._forward_micro_batch(
+                        model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
+                    )
             log_probs_lst.append(log_probs)
             if calculate_entropy:
                 entropy_lst.append(entropy)
@@ -419,6 +509,42 @@ class DataParallelPPOActor(BasePPOActor):
                     rollout_log_probs = model_inputs["rollout_log_probs"] if self.config.tis_imp_ratio_cap > 0 else None
                     advantages = model_inputs["advantages"]
 
+                    if self.config.use_confidence_loss:
+                        extra_info = model_inputs["extra_info"]
+                        confidence_scores = model_inputs["confidence_scores"] if self.config.use_confidence_loss else None
+                        print("confidence_scores in dp_actor update_policy:",confidence_scores)
+                        print("confidence_scores.shape in dp_actor update_policy:",confidence_scores.shape if confidence_scores is not None else None)
+                        responses = model_inputs["responses"]   
+                        print("extra_info",extra_info)
+                        print("type of extra_info:", type(extra_info))
+                        print("len of extra_info:", len(extra_info))
+                        print("responses",responses)
+                        # ground_truth = []
+                        # for i in reward_model:
+                        #     gt = i['ground_truth']
+                        #     ground_truth.append(gt)
+                        # print("ground_truth",ground_truth)
+                        average_accuracy = []
+                        for i in extra_info:
+                            if 'average_accuracy' in i:
+                                average_accuracy.append(i['average_accuracy'])
+                        print("average_accuracy",average_accuracy)
+                    print("📋 所有键:")
+                    for key in sorted(model_inputs.keys()):
+                        print(f"  {key}")
+
+                    print("\n📊 张量形状和类型:")
+                    for key, value in model_inputs.items():
+                        if torch.is_tensor(value):
+                            print(f"  {key}: shape={value.shape}, dtype={value.dtype}, device={value.device}")
+                        elif isinstance(value, list):
+                            print(f"  {key}: list with {len(value)} elements")
+                            # 如果是张量列表，打印第一个元素的形状
+                            if len(value) > 0 and torch.is_tensor(value[0]):
+                                print(f"    First element: shape={value[0].shape}")
+                        else:
+                            print(f"  {key}: {type(value)}")
+
                     entropy_coeff = self.config.entropy_coeff
                     loss_agg_mode = self.config.loss_agg_mode
 
@@ -431,9 +557,18 @@ class DataParallelPPOActor(BasePPOActor):
                     calculate_entropy = False
                     if entropy_coeff != 0:
                         calculate_entropy = True
-                    entropy, log_prob = self._forward_micro_batch(
-                        model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
-                    )
+                    if not self.config.use_confidence_loss:
+                        entropy, log_prob  = self._forward_micro_batch(
+                            model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
+                        )
+                    else:
+                        entropy, log_prob, confidence_scores = self._forward_micro_batch_withconfidence(
+                            model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
+                        )
+                    if self.config.use_confidence_loss:
+                        print("confidence_scores.shape in dp_actor:",confidence_scores.shape)
+                        print("confidence_scores",confidence_scores)
+                        print("average_accuracy",average_accuracy)
 
                     if on_policy:
                         old_log_prob = log_prob.detach()
@@ -485,6 +620,25 @@ class DataParallelPPOActor(BasePPOActor):
                         micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item() * loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
+                    if self.config.use_confidence_loss:
+                        print("adding confidence loss mse")
+                       
+                        average_accuracy = torch.tensor(average_accuracy, dtype=torch.float32, device=confidence_scores.device)
+
+                        # 保证形状匹配
+                        # confidence_scores: [batch, 1] → [batch]
+                        confidence_scores = confidence_scores.squeeze(-1)
+                        mse_loss_fn = nn.MSELoss()
+                        # 计算 MSE loss
+                        mse_loss = mse_loss_fn(confidence_scores, average_accuracy)
+
+                        print("confidence_scores:", confidence_scores)
+                        print("average_accuracy:", average_accuracy)
+                        print("MSE Loss:", mse_loss.item())
+                        print("self.config.confidence_loss_coef:", self.config.confidence_loss_coef)
+                        policy_loss = mse_loss * self.config.confidence_loss_coef
+                        print("Total Loss after adding confidence loss:", policy_loss.item())
+
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss = policy_loss * loss_scale_factor
@@ -501,6 +655,9 @@ class DataParallelPPOActor(BasePPOActor):
                         }
                     )
                     append_to_dict(metrics, micro_batch_metrics)
+
+                    if self.config.use_confidence_loss:
+                        micro_batch_metrics["actor/confidence_mse_loss"] = mse_loss.detach().item() * self.config.confidence_loss_coef
 
                 grad_norm = self._optimizer_step()
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}

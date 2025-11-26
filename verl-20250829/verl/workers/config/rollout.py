@@ -165,3 +165,9 @@ class RolloutConfig(BaseConfig):
     sglang_engine_mode: str = "local"
 
     limit_images: Optional[int] = None
+
+    use_another_path: bool = False
+
+    another_path: Optional[str] = None
+
+    exclude_params: Optional[list] = None

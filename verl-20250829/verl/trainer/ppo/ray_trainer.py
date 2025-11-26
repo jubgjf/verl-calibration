@@ -20,6 +20,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import re
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -60,6 +61,45 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+
+
+def extract_solution(solution_str) -> Optional[int]:
+    src_solution_str = solution_str
+    # 解析字节think tag
+    if "</seed:think>" in solution_str:
+        tag = "</seed:think>"
+        index = solution_str.rfind(tag)
+        solution_str = solution_str[index + len(tag) :].strip()
+    elif "</think>" in solution_str:
+        tag = "</think>"
+        index = solution_str.rfind(tag)
+        solution_str = solution_str[index + len(tag) :].strip()
+    else:
+        return None
+    # 解析 md json
+    if """```json""" in solution_str:
+        # 使用正则表达式提取json内容
+        # match = re.search(r'```json(.*?)```', solution_str, re.DOTALL)
+        match = re.search(r"```json(.*?)(?=```|$)", solution_str, re.DOTALL)
+
+        if match:
+            extracted_json = match.group(1).strip()  # 提取并去除多余空格
+            solution_str = extracted_json
+    else:
+        return None
+
+    # 比对gt
+    try:
+        json_result = json.loads(solution_str.replace("\n", ""))
+        # print("==========>", json_result)
+        if json_result["结论"] == "批准放款":
+            return 0
+        elif json_result["结论"] == "拒绝放款":
+            return 1
+        else:
+            return -1
+    except Exception as e:
+        return None
 
 
 @dataclass
@@ -1031,6 +1071,86 @@ class RayPPOTrainer:
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
+                    if self.config.actor_rollout_ref.actor.use_confidence_loss:
+                        print("self.config.actor_rollout_ref.actor.use_confidence_loss1111111111:", self.config.actor_rollout_ref.actor.use_confidence_loss)
+                        print("response.shape",batch.batch["responses"].shape)
+                        print("==== batch.batch 内容 ====")
+                        for k, v in batch.batch.items():
+                            if hasattr(v, "shape"):
+                                print(f"{k}: shape = {v.shape}, dtype = {v.dtype}")
+                            else:
+                                print(f"{k}: type = {type(v)} (no .shape attribute)")
+                        print("===========================")
+                        print("batch.batch['responses'] 内容预览:", batch.batch["responses"][0])  # Preview first 2 responses
+                        response_ids = batch.batch["responses"]
+                        response_str_list = []
+                        reward_model = batch.non_tensor_batch["reward_model"]
+                        print("reward_model:", reward_model)
+                        print("reward_model",type(reward_model))
+                        print("len(reward_model)",len(reward_model))
+                        ground_truth = []
+            
+                        n =  self.config.actor_rollout_ref.rollout.n
+                        m = len(reward_model)//n
+                        for i in reward_model:
+                            gt = i['ground_truth']
+                            ground_truth.append(gt)
+                        print("ground_truth",ground_truth) 
+                        print("ground_truth type",type(ground_truth))
+                        print("ground_truth length",len(ground_truth))                       
+                        for i in range(response_ids.shape[0]):
+                            valid_ids = response_ids[i].tolist()  # 转成 list
+                            response_str = self.tokenizer.decode(valid_ids, skip_special_tokens=True)
+                            response_str_list.append(response_str)
+
+                        print("response_str_list:", response_str_list)
+                        print("response_str_list.shape:", len(response_str_list))
+                        for i in response_str_list:
+                            print("response_str item preview:", i)
+                        model_answers_list = []
+                        for i in range(len(response_str_list)):
+                            model_answer = extract_solution(solution_str=response_str_list[i])
+                            model_answers_list.append(model_answer)
+                        print("model_answers_list:", model_answers_list)
+                        print("model_answers_list.shape:", len(model_answers_list))
+                        group_accuracies = []  # 每个任务的组内平均正确率
+                        for j in range(m):
+                            start = j * n
+                            end = (j + 1) * n
+
+                            correct_num = 0
+                            for i in range(start, end):
+                                if model_answers_list[i] is not None and model_answers_list[i] == ground_truth[i]:
+                                    correct_num += 1
+                            group_acc = correct_num / n
+                            group_accuracies.append(group_acc)
+
+                        print("group_accuracies:", group_accuracies)
+                        extra_info = batch.non_tensor_batch.get("extra_info", [{} for _ in range(len(response_str_list))])
+                        for j in range(m):
+                            start = j * n
+                            end = (j + 1) * n
+                            for i in range(start, end):
+                                extra_info[i]["response_str"] = response_str_list[i]
+                                extra_info[i]["average_accuracy"] = group_accuracies[j]
+
+                        batch.non_tensor_batch["extra_info"] = extra_info                        
+                        with marked_timer("actor_forward", timing_raw, color="orange"):
+                            confidence_scores = None
+                            old_log_prob_withconfidence = self.actor_rollout_wg.compute_log_prob_withconfidence(batch)
+                            confidence_scores = old_log_prob_withconfidence.batch["confidence_scores"]
+                            if confidence_scores is not None:
+                                print("i fininally got confidence scores!!!!!!!!!!!!")
+                                print("confidence_scores.shape:",confidence_scores.shape)
+                                print("i fininally got confidence scores!!!!!!!!!!!!")
+  
+                                # 这里的 shape 应该是 (batch_size, response_length)
+                                batch.batch["confidence_scores"] = confidence_scores
+                                print("Added confidence_scores to batch:", confidence_scores.shape)
+                        print("reward1111111111111111111111")
+                        print("response.shape",batch.batch["responses"].shape)
+                        print("confidence_scores.shape",batch.batch["confidence_scores"].shape)
+
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm:
@@ -1052,6 +1172,15 @@ class RayPPOTrainer:
                         old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
                         metrics.update(old_log_prob_metrics)
                         old_log_prob.batch.pop("entropys")
+
+                        # Extract confidence scores if available
+                        if "confidence_scores" in old_log_prob.batch:
+                            confidence_scores = old_log_prob.batch.pop("confidence_scores")
+                            batch.batch["confidence_scores"] = confidence_scores
+                            # Log mean confidence score
+                            mean_confidence = confidence_scores.mean().item()
+                            metrics["actor/mean_confidence_score"] = mean_confidence
+
                         batch = batch.union(old_log_prob)
 
                         if "rollout_log_probs" in batch.batch.keys():
