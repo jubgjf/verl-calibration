@@ -61,12 +61,22 @@ class NaiveRewardManager:
         solution_str = record['solution_str']
         ground_truth = record['ground_truth']
         extra_info = record['extra_info']
-        score = self.compute_score(
-            data_source=data_source,
-            solution_str=solution_str,
-            ground_truth=ground_truth,
-            extra_info=extra_info,
-        )
+        if "confidence_scores" in record:
+            confidence_scores = record['confidence_scores']
+            score = self.compute_score(
+                data_source=data_source,
+                solution_str=solution_str,
+                ground_truth=ground_truth,
+                extra_info=extra_info,
+                confidence_scores = confidence_scores,
+            )
+        else:
+            score = self.compute_score(
+                data_source=data_source,
+                solution_str=solution_str,
+                ground_truth=ground_truth,
+                extra_info=extra_info,
+            )
         return score
 
     def __call__(self, data: DataProto, return_dict=False):
@@ -116,17 +126,40 @@ class NaiveRewardManager:
             #     ground_truth=ground_truth,
             #     extra_info=extra_info,
             # )
+            confidence_scores = None
+            if "confidence_scores" in data_item.batch:
+                confidence_scores = data_item.batch.get("confidence_scores", None)
+
+                if isinstance(confidence_scores, torch.Tensor):
+                    if confidence_scores.numel() == 1:
+                        confidence_scores = confidence_scores.item()
+                    # else 保留原张量，不调用 .item()
+                                
+                print("get confidence in reward manager")
+            else:
+                confidence_scores = None  # 或者设置默认值，比如 0.0
+                print("fail to get confidence in reward manager")
             if data_source in data_source_count:
                 data_source_count[data_source]+=1
             else:
                 data_source_count[data_source]=1
-            records.append({
-                    "data_source": data_source,
-                    "solution_str": response_str,
-                    "ground_truth": ground_truth,
-                    "extra_info": extra_info,
-                }
-            )
+            if confidence_scores is None:
+                records.append({
+                        "data_source": data_source,
+                        "solution_str": response_str,
+                        "ground_truth": ground_truth,
+                        "extra_info": extra_info,
+                    }
+                )
+            else :
+                records.append({
+                        "data_source": data_source,
+                        "solution_str": response_str,
+                        "ground_truth": ground_truth,
+                        "extra_info": extra_info,
+                        "confidence_scores":confidence_scores,
+                    }
+                ) 
         print(data_source_count)
         score_list = batch_execute(self.exec, records)
 
