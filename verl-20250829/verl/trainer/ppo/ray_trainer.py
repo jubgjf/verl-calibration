@@ -63,43 +63,46 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 
 
-def extract_solution(solution_str) -> Optional[int]:
-    src_solution_str = solution_str
-    # 解析字节think tag
-    if "</seed:think>" in solution_str:
-        tag = "</seed:think>"
-        index = solution_str.rfind(tag)
-        solution_str = solution_str[index + len(tag) :].strip()
-    elif "</think>" in solution_str:
-        tag = "</think>"
-        index = solution_str.rfind(tag)
-        solution_str = solution_str[index + len(tag) :].strip()
-    else:
+def extract_solution(solution_str: str) -> str:
+    """
+    智能提取答案，从后往前自动检测格式并提取
+    """
+    if solution_str is None:
         return None
-    # 解析 md json
-    if """```json""" in solution_str:
-        # 使用正则表达式提取json内容
-        # match = re.search(r'```json(.*?)```', solution_str, re.DOTALL)
-        match = re.search(r"```json(.*?)(?=```|$)", solution_str, re.DOTALL)
-
-        if match:
-            extracted_json = match.group(1).strip()  # 提取并去除多余空格
-            solution_str = extracted_json
-    else:
-        return None
-
-    # 比对gt
-    try:
-        json_result = json.loads(solution_str.replace("\n", ""))
-        # print("==========>", json_result)
-        if json_result["结论"] == "批准放款":
-            return 0
-        elif json_result["结论"] == "拒绝放款":
-            return 1
-        else:
-            return -1
-    except Exception as e:
-        return None
+    
+    solution_str = solution_str.strip()
+    
+    # 修正方法列表：每个元素都是 (名称, 模式, 标志) 三元组
+    methods = [
+        ("strict_format", r"####\s*([^\n]+)", 0),
+        ("latex_boxed", r"\\boxed\{([^}]+)\}", 0),
+        ("latex_double_dollar", r"\$\$([^$]+)\$\$", 0),
+        ("latex_single_dollar", r"\$([^$]+)\$", 0),
+        ("final_answer", r"Final Answer[:\s]*([^\n]+)", re.IGNORECASE),
+        ("answer_marker", r"Answer[:\s]*([^\n]+)", re.IGNORECASE),
+    ]
+    
+    # 先尝试从后往前搜索结构化格式
+    for method_name, pattern, flags in methods:  # 现在解包三个值
+        matches = list(re.finditer(pattern, solution_str, flags))
+        if matches:
+            last_match = matches[-1]  # 取最后一个匹配
+            extracted = last_match.group(1).strip()
+            
+            # 清理LaTeX内容
+            if method_name.startswith("latex"):
+                num_match = re.search(r"[-+]?\d*\.?\d+", extracted)
+                if num_match:
+                    return num_match.group(0)
+            
+            return extracted
+    
+    # 如果结构化格式都没找到，从后往前找最后一个数字
+    numbers = re.findall(r"[-+]?\d*\.?\d+", solution_str)
+    if numbers:
+        return numbers[-1]  # 返回最后一个数字
+    
+    return None
 
 
 @dataclass
@@ -1137,7 +1140,8 @@ class RayPPOTrainer:
                         batch.non_tensor_batch["extra_info"] = extra_info                        
                         with marked_timer("actor_forward", timing_raw, color="orange"):
                             confidence_scores = None
-                            old_log_prob_withconfidence = self.actor_rollout_wg.compute_log_prob_withconfidence(batch)
+                            old_log_prob_withconfidence = self.actor_rollout_wg.compute_log_prob(batch)
+                            print("pass1")
                             confidence_scores = old_log_prob_withconfidence.batch["confidence_scores"]
                             if confidence_scores is not None:
                                 print("i fininally got confidence scores!!!!!!!!!!!!")
@@ -1147,6 +1151,8 @@ class RayPPOTrainer:
                                 # 这里的 shape 应该是 (batch_size, response_length)
                                 batch.batch["confidence_scores"] = confidence_scores
                                 print("Added confidence_scores to batch:", confidence_scores.shape)
+                            else :
+                                print("fail to get confidence")
                         print("reward1111111111111111111111")
                         print("response.shape",batch.batch["responses"].shape)
                         print("confidence_scores.shape",batch.batch["confidence_scores"].shape)

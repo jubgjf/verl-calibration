@@ -423,10 +423,12 @@ class DataParallelPPOActor(BasePPOActor):
             micro_batch = micro_batch.to(get_device_id())
             model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
+                print("has_confidence_head:",has_confidence_head)
                 if has_confidence_head:
                     entropy, log_probs, confidence_scores = self._forward_micro_batch_withconfidence(
                         model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
                     )
+                    print("confidence_scores",confidence_scores)
                     if confidence_scores is not None:
                         confidence_scores_lst.append(confidence_scores)
                 else:
@@ -438,6 +440,7 @@ class DataParallelPPOActor(BasePPOActor):
                 entropy_lst.append(entropy)
 
         log_probs = torch.concat(log_probs_lst, dim=0)
+        confidence_scores = torch.concat(confidence_scores_lst, dim=0)
         entropys = None
         if calculate_entropy:
             entropys = torch.concat(entropy_lst, dim=0)
@@ -446,8 +449,10 @@ class DataParallelPPOActor(BasePPOActor):
             log_probs = restore_dynamic_batch(log_probs, batch_idx_list)
             if calculate_entropy:
                 entropys = restore_dynamic_batch(entropys, batch_idx_list)
-
-        return log_probs, entropys
+        if confidence_scores_lst is None:
+            return log_probs, entropys,confidence_scores
+        else :
+            return log_probs, entropys,confidence_scores
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
@@ -456,15 +461,27 @@ class DataParallelPPOActor(BasePPOActor):
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
 
-        select_keys = [
-            "responses",
-            "response_mask",
-            "input_ids",
-            "attention_mask",
-            "position_ids",
-            "old_log_probs",
-            "advantages",
-        ]
+        if self.config.use_confidence_loss:
+            select_keys = [
+                "responses",
+                "response_mask",
+                "input_ids",
+                "attention_mask",
+                "position_ids",
+                "old_log_probs",
+                "advantages",
+                "confidence_scores",
+            ]
+        else :
+            select_keys = [
+                "responses",
+                "response_mask",
+                "input_ids",
+                "attention_mask",
+                "position_ids",
+                "old_log_probs",
+                "advantages",
+            ]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         if self.config.tis_imp_ratio_cap > 0:
@@ -477,7 +494,9 @@ class DataParallelPPOActor(BasePPOActor):
 
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
-
+        if self.config.use_confidence_loss:
+            non_tensor_select_keys.append("extra_info")
+            non_tensor_select_keys.append("reward_model")
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
 
         # Split to make minibatch iterator for updating the actor
@@ -504,6 +523,12 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batch = micro_batch.to(get_device_id())
                     micro_batch_metrics = {}
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+                    # 查看 model_inputs 的内容
+                    print("=== model_inputs keys ===")
+                    print(model_inputs.keys())
+                    print("=== model_inputs sample ===")
+                    for k, v in model_inputs.items():
+                        print(k, type(v), getattr(v, "shape", None))  
                     response_mask = model_inputs["response_mask"]
                     old_log_prob = model_inputs["old_log_probs"]
                     rollout_log_probs = model_inputs["rollout_log_probs"] if self.config.tis_imp_ratio_cap > 0 else None
@@ -511,14 +536,13 @@ class DataParallelPPOActor(BasePPOActor):
 
                     if self.config.use_confidence_loss:
                         extra_info = model_inputs["extra_info"]
-                        confidence_scores = model_inputs["confidence_scores"] if self.config.use_confidence_loss else None
+                        confidence_scores = model_inputs["confidence_scores"] 
                         print("confidence_scores in dp_actor update_policy:",confidence_scores)
                         print("confidence_scores.shape in dp_actor update_policy:",confidence_scores.shape if confidence_scores is not None else None)
-                        responses = model_inputs["responses"]   
+
                         print("extra_info",extra_info)
                         print("type of extra_info:", type(extra_info))
                         print("len of extra_info:", len(extra_info))
-                        print("responses",responses)
                         # ground_truth = []
                         # for i in reward_model:
                         #     gt = i['ground_truth']
@@ -621,23 +645,41 @@ class DataParallelPPOActor(BasePPOActor):
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
                     if self.config.use_confidence_loss:
-                        print("adding confidence loss mse")
-                       
-                        average_accuracy = torch.tensor(average_accuracy, dtype=torch.float32, device=confidence_scores.device)
+                        # 转成 tensor
+                        average_accuracy = torch.tensor(
+                            average_accuracy, dtype=torch.float32, device=confidence_scores.device
+                        )
 
-                        # 保证形状匹配
-                        # confidence_scores: [batch, 1] → [batch]
-                        confidence_scores = confidence_scores.squeeze(-1)
-                        mse_loss_fn = nn.MSELoss()
+                        # confidence_scores: [batch, 1] → [batch] 或标量 → [1]
+                        if confidence_scores.dim() == 2 and confidence_scores.size(1) == 1:
+                            confidence_scores = confidence_scores.squeeze(-1)
+                        elif confidence_scores.dim() == 0:
+                            confidence_scores = confidence_scores.unsqueeze(0)
+
+                        # average_accuracy: [batch] 或标量 → [batch]
+                        if average_accuracy.dim() == 0:
+                            average_accuracy = average_accuracy.unsqueeze(0)
+                        elif average_accuracy.dim() == 2 and average_accuracy.size(1) == 1:
+                            average_accuracy = average_accuracy.squeeze(-1)
+
+                        # 再确认 shape 是否匹配
+                        if confidence_scores.shape != average_accuracy.shape:
+                            raise ValueError(
+                                f"Shape mismatch: confidence_scores {confidence_scores.shape} vs average_accuracy {average_accuracy.shape}"
+                            )
+
                         # 计算 MSE loss
+                        mse_loss_fn = nn.MSELoss()
                         mse_loss = mse_loss_fn(confidence_scores, average_accuracy)
 
+                        # 打印调试信息
                         print("confidence_scores:", confidence_scores)
                         print("average_accuracy:", average_accuracy)
                         print("MSE Loss:", mse_loss.item())
-                        print("self.config.confidence_loss_coef:", self.config.confidence_loss_coef)
-                        policy_loss = mse_loss * self.config.confidence_loss_coef
-                        print("Total Loss after adding confidence loss:", policy_loss.item())
+
+                        # 加到 policy_loss
+                        policy_loss = policy_loss + mse_loss * self.config.confidence_loss_coef
+
 
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz

@@ -79,7 +79,7 @@ class Qwen3ForCausalLMWithConfidence(Qwen3ForCausalLM):
         # Confidence head forward - outputs per-token confidence scores
         confidence_logits = self.confidence_head(hidden_states)  # (batch_size, seq_len, 1)
         confidence_scores = torch.sigmoid(confidence_logits.squeeze(-1)).to(torch.float32)  # (batch_size, seq_len)
-
+        last_confidence_scores = confidence_scores[:, -1] 
         loss = None
         if labels is not None:
             # Compute standard language modeling loss
@@ -99,7 +99,7 @@ class Qwen3ForCausalLMWithConfidence(Qwen3ForCausalLM):
             past_key_values=transformer_outputs.past_key_values,
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
-            confidence_scores=confidence_scores,
+            confidence_scores=last_confidence_scores,
         )
 
     def prepare_inputs_for_generation(
